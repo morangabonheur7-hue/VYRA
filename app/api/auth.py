@@ -29,6 +29,10 @@ router = APIRouter(
 security = HTTPBearer(auto_error=False)
 
 
+# ---------------------------------------------------------------------------
+# JWT
+# ---------------------------------------------------------------------------
+
 def _create_token(
     *,
     user_id: int,
@@ -95,18 +99,35 @@ def _decode_token(token: str) -> dict[str, Any]:
 
 
 def _build_tokens(user_id: int) -> TokenResponse:
+    """
+    Construit la réponse JWT complète.
+
+    expires_in est exprimé en secondes et correspond
+    à la durée de vie de l'access token.
+    """
+    expires_in = settings.access_token_expire_minutes * 60
+
     return TokenResponse(
         access_token=_create_access_token(user_id),
         refresh_token=_create_refresh_token(user_id),
         token_type="bearer",
+        expires_in=expires_in,
     )
 
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
 
 def _service(
     connection: sqlite3.Connection,
 ) -> UserService:
     return UserService(connection)
 
+
+# ---------------------------------------------------------------------------
+# Current user
+# ---------------------------------------------------------------------------
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
@@ -116,6 +137,13 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentification requise.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Le schéma d'authentification doit être Bearer.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -164,6 +192,10 @@ def get_current_user(
     return user
 
 
+# ---------------------------------------------------------------------------
+# Register
+# ---------------------------------------------------------------------------
+
 @router.post(
     "/register",
     response_model=UserLoginResponse,
@@ -191,6 +223,10 @@ def register(
             detail=error.to_dict(),
         ) from error
 
+
+# ---------------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------------
 
 @router.post(
     "/login",
@@ -222,6 +258,10 @@ def login(
         ) from error
 
 
+# ---------------------------------------------------------------------------
+# Current profile
+# ---------------------------------------------------------------------------
+
 @router.get(
     "/me",
     response_model=UserResponse,
@@ -233,6 +273,10 @@ def get_me(
         current_user.to_dict()
     )
 
+
+# ---------------------------------------------------------------------------
+# Refresh token
+# ---------------------------------------------------------------------------
 
 @router.post(
     "/refresh",
@@ -246,6 +290,13 @@ def refresh_token(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token requis.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Le schéma d'authentification doit être Bearer.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -293,6 +344,10 @@ def refresh_token(
 
     return _build_tokens(user.id)
 
+
+# ---------------------------------------------------------------------------
+# Change password
+# ---------------------------------------------------------------------------
 
 @router.post(
     "/change-password",
