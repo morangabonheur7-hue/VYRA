@@ -11,6 +11,7 @@ from app.api import (
     messages,
     tasks,
     users,
+    WhatsApp,
 )
 from app.core.config import settings
 from app.core.database import initialize_database
@@ -90,5 +91,10 @@ app.include_router(
 
 app.include_router(
     assistant.router,
+    prefix=settings.api_prefix,
+)
+
+app.include_router(
+    whatsapp.router,
     prefix=settings.api_prefix,
 )
