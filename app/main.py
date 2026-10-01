@@ -11,7 +11,7 @@ from app.api import (
     messages,
     tasks,
     users,
-    whatsApp,
+    whatsapp,
 )
 from app.core.config import settings
 from app.core.database import initialize_database
