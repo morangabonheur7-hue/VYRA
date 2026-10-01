@@ -13,14 +13,6 @@ from app.core.errors import (
 
 
 class GeminiProvider:
-    """
-    Provider Gemini pour VYRA.
-
-    Cette classe communique directement avec l'API REST Gemini.
-    Le reste de VYRA ne dépend pas directement de Gemini :
-    il passe par l'AI Gateway.
-    """
-
     name = "gemini"
 
     def __init__(self) -> None:
@@ -28,15 +20,7 @@ class GeminiProvider:
         self.base_url = settings.ai_base_url.rstrip("/")
         self.default_model = settings.ai_model
 
-    # ==========================================================
-    # PUBLIC API
-    # ==========================================================
-
     def generate(self, request: AIRequest) -> AIResponse:
-        """
-        Génère une réponse avec Gemini.
-        """
-
         self._validate_configuration()
 
         model = request.model or self.default_model
@@ -104,17 +88,12 @@ class GeminiProvider:
                 },
             ) from exc
 
-        return self._parse_response(raw_response, model)
-
-    # ==========================================================
-    # CONFIGURATION
-    # ==========================================================
+        return self._parse_response(
+            raw_response,
+            model,
+        )
 
     def _validate_configuration(self) -> None:
-        """
-        Vérifie que Gemini possède les informations nécessaires.
-        """
-
         if not self.api_key:
             raise AIConfigurationError(
                 message="Gemini API key is not configured.",
@@ -136,17 +115,10 @@ class GeminiProvider:
                 },
             )
 
-    # ==========================================================
-    # REQUEST BUILDING
-    # ==========================================================
-
     def _build_payload(
         self,
         request: AIRequest,
     ) -> dict[str, Any]:
-        """
-        Transforme une AIRequest VYRA en payload Gemini.
-        """
 
         contents: list[dict[str, Any]] = []
 
@@ -182,11 +154,6 @@ class GeminiProvider:
             )
 
         generation_config: dict[str, Any] = {
-            "temperature": (
-                request.temperature
-                if request.temperature is not None
-                else settings.ai_temperature
-            ),
             "maxOutputTokens": (
                 request.max_tokens
                 if request.max_tokens is not None
@@ -210,16 +177,8 @@ class GeminiProvider:
 
         return payload
 
-    # ==========================================================
-    # ROLE MAPPING
-    # ==========================================================
-
     @staticmethod
     def _map_role(role: str) -> str:
-        """
-        Convertit les rôles VYRA vers les rôles Gemini.
-        """
-
         normalized = role.strip().lower()
 
         if normalized in {
@@ -230,18 +189,11 @@ class GeminiProvider:
 
         return "user"
 
-    # ==========================================================
-    # RESPONSE PARSING
-    # ==========================================================
-
     def _parse_response(
         self,
         raw_response: str,
         model: str,
     ) -> AIResponse:
-        """
-        Transforme la réponse Gemini en AIResponse VYRA.
-        """
 
         try:
             data = json.loads(raw_response)
@@ -279,20 +231,26 @@ class GeminiProvider:
     def _extract_text(
         data: dict[str, Any],
     ) -> str:
-        """
-        Extrait le texte depuis le premier candidat Gemini.
-        """
 
-        candidates = data.get("candidates", [])
+        candidates = data.get(
+            "candidates",
+            [],
+        )
 
         if not candidates:
             return ""
 
         candidate = candidates[0]
 
-        content = candidate.get("content", {})
+        content = candidate.get(
+            "content",
+            {},
+        )
 
-        parts = content.get("parts", [])
+        parts = content.get(
+            "parts",
+            [],
+        )
 
         text_parts: list[str] = []
 
@@ -310,9 +268,6 @@ class GeminiProvider:
     def _extract_usage(
         data: dict[str, Any],
     ) -> dict[str, Any]:
-        """
-        Extrait les informations de consommation disponibles.
-        """
 
         usage_metadata = data.get(
             "usageMetadata",
@@ -337,17 +292,10 @@ class GeminiProvider:
             ),
         }
 
-    # ==========================================================
-    # ERROR HANDLING
-    # ==========================================================
-
     @staticmethod
     def _read_http_error(
         error: urllib.error.HTTPError,
     ) -> str:
-        """
-        Lit proprement le corps d'une erreur HTTP.
-        """
 
         try:
             body = error.read().decode(
@@ -365,26 +313,17 @@ class GeminiProvider:
 
 
 class MockAIProvider:
-    """
-    Provider local de test.
-
-    Il permet de tester VYRA sans appeler une API externe.
-    """
-
     name = "mock"
 
     def generate(
         self,
         request: AIRequest,
     ) -> AIResponse:
-        """
-        Retourne une réponse déterministe de test.
-        """
 
         return AIResponse(
             text=(
-                "Réponse de test générée par le "
-                "MockAIProvider de VYRA."
+                "Réponse de test générée "
+                "par le MockAIProvider de VYRA."
             ),
             provider=self.name,
             model=request.model or "mock-model",
@@ -399,16 +338,12 @@ class MockAIProvider:
         )
 
 
-# ==============================================================
-# PROVIDER FACTORY
-# ==============================================================
-
 def create_ai_provider():
-    """
-    Crée le provider correspondant à la configuration VYRA.
-    """
-
-    provider_name = settings.ai_provider.strip().lower()
+    provider_name = (
+        settings.ai_provider
+        .strip()
+        .lower()
+    )
 
     if provider_name == "gemini":
         return GeminiProvider()
@@ -427,4 +362,4 @@ def create_ai_provider():
                 "mock",
             ],
         },
-    )
+)
