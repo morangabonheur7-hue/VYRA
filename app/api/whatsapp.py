@@ -2,6 +2,9 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from app.ai.gateway import ai_gateway
+from app.core.errors import VYRAError
+
 router = APIRouter(
     prefix="/whatsapp",
     tags=["WhatsApp"],
@@ -9,12 +12,12 @@ router = APIRouter(
 
 
 @router.post("/webhook")
-async def whatsapp_webhook(payload: dict[str, Any]) -> dict[str, Any]:
+async def whatsapp_webhook(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     """
-    Point d'entrée utilisé par AutoResponder.
-
-    Reçoit le message WhatsApp et renvoie une réponse
-    dans le format attendu par le connecteur.
+    Reçoit un message WhatsApp via AutoResponder,
+    l'envoie à l'IA de VYRA et retourne la réponse.
     """
 
     query = payload.get("query", {})
@@ -22,17 +25,51 @@ async def whatsapp_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(query, dict):
         query = {}
 
-    message = str(query.get("message", "")).strip()
+    message = str(
+        query.get("message", "")
+    ).strip()
 
     if not message:
         return {
             "replies": []
         }
 
+    system_prompt = """
+Tu es VYRA, un assistant IA commercial et personnel.
+
+Tu réponds naturellement, clairement et brièvement
+aux messages reçus sur WhatsApp.
+
+Tu aides l'utilisateur dans ses échanges avec ses clients
+et prospects.
+
+Ne prétends jamais avoir effectué une action que tu n'as
+pas réellement effectuée.
+
+Si une information manque, pose simplement la question
+nécessaire.
+
+Réponds dans la langue utilisée par ton interlocuteur.
+""".strip()
+
+    try:
+        response = ai_gateway.generate_text(
+            message,
+            system_prompt=system_prompt,
+        )
+
+    except Exception as exc:
+        raise VYRAError(
+            message="VYRA AI response failed.",
+            details={
+                "error": str(exc),
+            },
+        ) from exc
+
     return {
         "replies": [
             {
-                "message": "Bonjour ! Je suis VYRA. Comment puis-je vous aider ?"
+                "message": response.text.strip()
             }
         ]
-    }
+}
