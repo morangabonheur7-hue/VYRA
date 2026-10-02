@@ -1,15 +1,13 @@
 import json
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any
 
-from app.core.errors import (
-    DatabaseError,
-)
+from app.core.errors import DatabaseError
 from app.models.message import (
     Message,
     MessageRole,
     MessageSender,
-    MessageStatus,
 )
 
 
@@ -24,9 +22,6 @@ class MessageService:
         - les messages entrants ;
         - les réponses IA ;
         - les statuts des messages.
-
-    Ce service constitue la base du contexte conversationnel
-    utilisé plus tard par VYRA et Gemini.
     """
 
     def __init__(
@@ -35,18 +30,7 @@ class MessageService:
     ) -> None:
         self.connection = connection
 
-    # ==========================================================
-    # CREATE
-    # ==========================================================
-
-    def create_message(
-        self,
-        message: Message,
-    ) -> Message:
-        """
-        Enregistre un message dans la base de données.
-        """
-
+    def create_message(self, message: Message) -> Message:
         query = """
             INSERT INTO messages (
                 conversation_id,
@@ -55,21 +39,29 @@ class MessageService:
                 content,
                 status,
                 is_ai_generated,
-                requires_approval,
-                approved_by_user,
+                requires_human_validation,
+                is_approved,
+                approved_at,
                 external_message_id,
                 metadata,
                 created_at,
                 updated_at,
                 sent_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         metadata = json.dumps(
             message.metadata,
             ensure_ascii=False,
         )
+
+        approved_at = None
+
+        if message.approved_by_user:
+            approved_at = datetime.now(
+                timezone.utc
+            ).isoformat()
 
         values = (
             message.conversation_id,
@@ -80,15 +72,14 @@ class MessageService:
             int(message.is_ai_generated),
             int(message.requires_approval),
             int(message.approved_by_user),
+            approved_at,
             message.external_message_id,
             metadata,
             message.created_at.isoformat(),
             message.updated_at.isoformat(),
-            (
-                message.sent_at.isoformat()
-                if message.sent_at
-                else None
-            ),
+            message.sent_at.isoformat()
+            if message.sent_at
+            else None,
         )
 
         try:
@@ -96,7 +87,6 @@ class MessageService:
                 query,
                 values,
             )
-
             self.connection.commit()
 
             message.id = cursor.lastrowid
@@ -121,18 +111,11 @@ class MessageService:
                 "l'enregistrement du message."
             ) from exc
 
-    # ==========================================================
-    # READ
-    # ==========================================================
-
     def get_message(
         self,
         *,
         message_id: int,
     ) -> Message | None:
-        """
-        Récupère un message par son identifiant.
-        """
 
         query = """
             SELECT *
@@ -157,27 +140,14 @@ class MessageService:
 
         return Message.from_row(row)
 
-    # ==========================================================
-    # CONVERSATION HISTORY
-    # ==========================================================
-
     def get_conversation_messages(
         self,
         *,
         conversation_id: int,
         limit: int = 50,
     ) -> list[Message]:
-        """
-        Récupère les messages d'une conversation.
 
-        Les messages sont retournés dans l'ordre chronologique,
-        du plus ancien au plus récent.
-        """
-
-        limit = min(
-            max(limit, 1),
-            200,
-        )
+        limit = min(max(limit, 1), 200)
 
         query = """
             SELECT *
@@ -190,16 +160,13 @@ class MessageService:
         try:
             rows = self.connection.execute(
                 query,
-                (
-                    conversation_id,
-                    limit,
-                ),
+                (conversation_id, limit),
             ).fetchall()
 
         except sqlite3.Error as exc:
             raise DatabaseError(
-                "Impossible de récupérer l'historique "
-                "de la conversation."
+                "Impossible de récupérer "
+                "l'historique de la conversation."
             ) from exc
 
         messages = [
@@ -211,33 +178,12 @@ class MessageService:
 
         return messages
 
-    # ==========================================================
-    # AI CONTEXT
-    # ==========================================================
-
     def get_ai_context(
         self,
         *,
         conversation_id: int,
         limit: int = 20,
     ) -> list[dict[str, str]]:
-        """
-        Prépare l'historique d'une conversation dans un format
-        directement exploitable par le système IA.
-
-        Exemple :
-
-        [
-            {
-                "role": "user",
-                "content": "Bonjour"
-            },
-            {
-                "role": "assistant",
-                "content": "Bonjour ! Comment puis-je vous aider ?"
-            }
-        ]
-        """
 
         messages = self.get_conversation_messages(
             conversation_id=conversation_id,
@@ -262,9 +208,6 @@ class MessageService:
     def _ai_role(
         message: Message,
     ) -> str:
-        """
-        Convertit le rôle VYRA en rôle compatible avec Gemini.
-        """
 
         if message.role == MessageRole.ASSISTANT:
             return "assistant"
@@ -274,10 +217,6 @@ class MessageService:
 
         return "user"
 
-    # ==========================================================
-    # INCOMING MESSAGE
-    # ==========================================================
-
     def create_incoming_message(
         self,
         *,
@@ -286,9 +225,6 @@ class MessageService:
         external_message_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Message:
-        """
-        Crée et enregistre un message reçu d'un contact.
-        """
 
         message = Message.incoming(
             conversation_id=conversation_id,
@@ -299,10 +235,6 @@ class MessageService:
 
         return self.create_message(message)
 
-    # ==========================================================
-    # USER MESSAGE
-    # ==========================================================
-
     def create_user_message(
         self,
         *,
@@ -311,9 +243,6 @@ class MessageService:
         external_message_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Message:
-        """
-        Crée et enregistre un message écrit par l'utilisateur.
-        """
 
         message = Message.user_message(
             conversation_id=conversation_id,
@@ -324,10 +253,6 @@ class MessageService:
 
         return self.create_message(message)
 
-    # ==========================================================
-    # AI MESSAGE
-    # ==========================================================
-
     def create_ai_draft(
         self,
         *,
@@ -335,11 +260,6 @@ class MessageService:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> Message:
-        """
-        Crée et enregistre une réponse proposée par VYRA.
-
-        La réponse reste en attente de validation humaine.
-        """
 
         message = Message.ai_draft(
             conversation_id=conversation_id,
@@ -349,19 +269,11 @@ class MessageService:
 
         return self.create_message(message)
 
-    # ==========================================================
-    # EXTERNAL MESSAGE SEARCH
-    # ==========================================================
-
     def get_by_external_id(
         self,
         *,
         external_message_id: str,
     ) -> Message | None:
-        """
-        Recherche un message provenant d'un service externe,
-        par exemple WhatsApp.
-        """
 
         query = """
             SELECT *
@@ -378,7 +290,8 @@ class MessageService:
 
         except sqlite3.Error as exc:
             raise DatabaseError(
-                "Impossible de rechercher le message externe."
+                "Impossible de rechercher "
+                "le message externe."
             ) from exc
 
         if row is None:
@@ -386,17 +299,10 @@ class MessageService:
 
         return Message.from_row(row)
 
-    # ==========================================================
-    # UPDATE STATUS
-    # ==========================================================
-
     def update_message(
         self,
         message: Message,
     ) -> Message:
-        """
-        Sauvegarde l'état actuel d'un message.
-        """
 
         if message.id is None:
             raise DatabaseError(
@@ -411,8 +317,9 @@ class MessageService:
                 role = ?,
                 status = ?,
                 is_ai_generated = ?,
-                requires_approval = ?,
-                approved_by_user = ?,
+                requires_human_validation = ?,
+                is_approved = ?,
+                approved_at = ?,
                 external_message_id = ?,
                 metadata = ?,
                 updated_at = ?,
@@ -425,6 +332,13 @@ class MessageService:
             ensure_ascii=False,
         )
 
+        approved_at = None
+
+        if message.approved_by_user:
+            approved_at = datetime.now(
+                timezone.utc
+            ).isoformat()
+
         values = (
             message.content,
             message.role.value,
@@ -432,14 +346,13 @@ class MessageService:
             int(message.is_ai_generated),
             int(message.requires_approval),
             int(message.approved_by_user),
+            approved_at,
             message.external_message_id,
             metadata,
             message.updated_at.isoformat(),
-            (
-                message.sent_at.isoformat()
-                if message.sent_at
-                else None
-            ),
+            message.sent_at.isoformat()
+            if message.sent_at
+            else None,
             message.id,
         )
 
@@ -460,21 +373,14 @@ class MessageService:
                 "Impossible de modifier le message."
             ) from exc
 
-    # ==========================================================
-    # APPROVAL
-    # ==========================================================
-
     def approve_message(
         self,
         *,
         message_id: int,
     ) -> Message:
-        """
-        Approuve une réponse IA.
-        """
 
         message = self.get_message(
-            message_id=message_id,
+            message_id=message_id
         )
 
         if message is None:
@@ -486,21 +392,14 @@ class MessageService:
 
         return self.update_message(message)
 
-    # ==========================================================
-    # REJECT
-    # ==========================================================
-
     def reject_message(
         self,
         *,
         message_id: int,
     ) -> Message:
-        """
-        Rejette une réponse IA.
-        """
 
         message = self.get_message(
-            message_id=message_id,
+            message_id=message_id
         )
 
         if message is None:
@@ -512,21 +411,14 @@ class MessageService:
 
         return self.update_message(message)
 
-    # ==========================================================
-    # SENT
-    # ==========================================================
-
     def mark_as_sent(
         self,
         *,
         message_id: int,
     ) -> Message:
-        """
-        Marque un message comme envoyé.
-        """
 
         message = self.get_message(
-            message_id=message_id,
+            message_id=message_id
         )
 
         if message is None:
@@ -538,18 +430,11 @@ class MessageService:
 
         return self.update_message(message)
 
-    # ==========================================================
-    # DELETE
-    # ==========================================================
-
     def delete_message(
         self,
         *,
         message_id: int,
     ) -> None:
-        """
-        Supprime définitivement un message.
-        """
 
         query = """
             DELETE FROM messages
@@ -574,4 +459,4 @@ class MessageService:
         if cursor.rowcount == 0:
             raise DatabaseError(
                 "Message introuvable."
-            )
+    )
