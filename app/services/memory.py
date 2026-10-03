@@ -1,7 +1,8 @@
 import json
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any
+
+import psycopg
 
 from app.core.errors import DatabaseError, MemoryNotFoundError
 
@@ -14,25 +15,19 @@ class MemoryService:
     """
     Service de mémoire contextuelle de VYRA.
 
-    La mémoire permet de conserver des informations utiles
-    concernant un contact ou une conversation afin que
-    l'assistant puisse utiliser le contexte lors de futures
-    interactions.
+    La mémoire conserve les informations utiles concernant
+    un contact ou une conversation.
 
-    Exemples :
-    - préférence du client ;
-    - budget annoncé ;
-    - produit recherché ;
-    - information personnelle utile ;
-    - résumé d'une conversation ;
-    - besoin identifié.
+    PostgreSQL :
+        - content contient une représentation textuelle de la valeur ;
+        - metadata contient la clé et la valeur structurée.
     """
 
     TABLE_NAME = "memories"
 
     def __init__(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
     ) -> None:
         self.connection = connection
 
@@ -51,9 +46,6 @@ class MemoryService:
         memory_type: str = "fact",
         importance: int = 3,
     ) -> dict[str, Any]:
-        """
-        Crée une nouvelle mémoire.
-        """
 
         key = self._normalize_key(key)
         memory_type = self._normalize_memory_type(memory_type)
@@ -67,48 +59,62 @@ class MemoryService:
 
         now = utc_now().isoformat()
 
+        metadata = json.dumps(
+            {
+                "key": key,
+                "value": value,
+            },
+            ensure_ascii=False,
+        )
+
+        content = json.dumps(
+            value,
+            ensure_ascii=False,
+        )
+
         query = """
             INSERT INTO memories (
                 user_id,
                 contact_id,
                 conversation_id,
-                memory_key,
-                memory_value,
                 memory_type,
+                content,
                 importance,
+                metadata,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s
+            )
+            RETURNING id
         """
 
         try:
-            cursor = self.connection.execute(
+            row = self.connection.execute(
                 query,
                 (
                     user_id,
                     contact_id,
                     conversation_id,
-                    key,
-                    json.dumps(
-                        value,
-                        ensure_ascii=False,
-                    ),
                     memory_type,
+                    content,
                     importance,
+                    metadata,
                     now,
                     now,
                 ),
-            )
+            ).fetchone()
 
             self.connection.commit()
 
             return self.get_memory(
                 user_id=user_id,
-                memory_id=cursor.lastrowid,
+                memory_id=row["id"],
             )
 
-        except sqlite3.IntegrityError as exc:
+        except psycopg.IntegrityError as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -116,7 +122,7 @@ class MemoryService:
                 details={"database_error": str(exc)},
             ) from exc
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -134,15 +140,12 @@ class MemoryService:
         user_id: int,
         memory_id: int,
     ) -> dict[str, Any]:
-        """
-        Récupère une mémoire.
-        """
 
         query = """
             SELECT *
             FROM memories
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
             LIMIT 1
         """
 
@@ -155,7 +158,7 @@ class MemoryService:
                 ),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer la mémoire."
             ) from exc
@@ -177,34 +180,31 @@ class MemoryService:
         minimum_importance: int = 1,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """
-        Récupère les mémoires pertinentes pour un utilisateur,
-        contact ou conversation.
-        """
 
         limit = min(max(limit, 1), 500)
+
         minimum_importance = self._normalize_importance(
             minimum_importance
         )
 
-        conditions = ["user_id = ?"]
+        conditions = ["user_id = %s"]
         parameters: list[Any] = [user_id]
 
         if contact_id is not None:
-            conditions.append("contact_id = ?")
+            conditions.append("contact_id = %s")
             parameters.append(contact_id)
 
         if conversation_id is not None:
-            conditions.append("conversation_id = ?")
+            conditions.append("conversation_id = %s")
             parameters.append(conversation_id)
 
         if memory_type is not None:
-            conditions.append("memory_type = ?")
+            conditions.append("memory_type = %s")
             parameters.append(
                 self._normalize_memory_type(memory_type)
             )
 
-        conditions.append("importance >= ?")
+        conditions.append("importance >= %s")
         parameters.append(minimum_importance)
 
         query = f"""
@@ -212,7 +212,7 @@ class MemoryService:
             FROM memories
             WHERE {" AND ".join(conditions)}
             ORDER BY importance DESC, updated_at DESC
-            LIMIT ?
+            LIMIT %s
         """
 
         parameters.append(limit)
@@ -223,7 +223,7 @@ class MemoryService:
                 parameters,
             ).fetchall()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer les mémoires."
             ) from exc
@@ -246,9 +246,6 @@ class MemoryService:
         memory_type: str | None = None,
         importance: int | None = None,
     ) -> dict[str, Any]:
-        """
-        Met à jour une mémoire existante.
-        """
 
         memory = self.get_memory(
             user_id=user_id,
@@ -275,27 +272,39 @@ class MemoryService:
 
         updated_at = utc_now().isoformat()
 
+        metadata = json.dumps(
+            {
+                "key": memory["key"],
+                "value": new_value,
+            },
+            ensure_ascii=False,
+        )
+
+        content = json.dumps(
+            new_value,
+            ensure_ascii=False,
+        )
+
         query = """
             UPDATE memories
             SET
-                memory_value = ?,
-                memory_type = ?,
-                importance = ?,
-                updated_at = ?
-            WHERE id = ?
-              AND user_id = ?
+                content = %s,
+                memory_type = %s,
+                importance = %s,
+                metadata = %s,
+                updated_at = %s
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
             self.connection.execute(
                 query,
                 (
-                    json.dumps(
-                        new_value,
-                        ensure_ascii=False,
-                    ),
+                    content,
                     new_type,
                     new_importance,
+                    metadata,
                     updated_at,
                     memory_id,
                     user_id,
@@ -304,7 +313,7 @@ class MemoryService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -326,9 +335,6 @@ class MemoryService:
         user_id: int,
         memory_id: int,
     ) -> None:
-        """
-        Supprime une mémoire.
-        """
 
         self.get_memory(
             user_id=user_id,
@@ -337,8 +343,8 @@ class MemoryService:
 
         query = """
             DELETE FROM memories
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
@@ -352,7 +358,7 @@ class MemoryService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -376,10 +382,6 @@ class MemoryService:
         conversation_id: int | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """
-        Construit un contexte propre à transmettre plus tard
-        au système IA.
-        """
 
         memories = self.list_memories(
             user_id=user_id,
@@ -423,6 +425,7 @@ class MemoryService:
     def _normalize_memory_type(
         memory_type: str,
     ) -> str:
+
         if not isinstance(memory_type, str):
             raise TypeError(
                 "Le type de mémoire doit être une chaîne."
@@ -452,8 +455,10 @@ class MemoryService:
     def _normalize_importance(
         importance: int,
     ) -> int:
+
         try:
             importance = int(importance)
+
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "L'importance doit être un nombre entier."
@@ -468,12 +473,13 @@ class MemoryService:
         contact_id: int | None,
         conversation_id: int | None,
     ) -> None:
+
         if contact_id is not None:
             query = """
                 SELECT id
                 FROM contacts
-                WHERE id = ?
-                  AND user_id = ?
+                WHERE id = %s
+                  AND user_id = %s
                 LIMIT 1
             """
 
@@ -486,7 +492,7 @@ class MemoryService:
                     ),
                 ).fetchone()
 
-            except sqlite3.Error as exc:
+            except psycopg.Error as exc:
                 raise DatabaseError(
                     "Impossible de vérifier le contact."
                 ) from exc
@@ -501,8 +507,8 @@ class MemoryService:
             query = """
                 SELECT id
                 FROM conversations
-                WHERE id = ?
-                  AND user_id = ?
+                WHERE id = %s
+                  AND user_id = %s
                 LIMIT 1
             """
 
@@ -515,7 +521,7 @@ class MemoryService:
                     ),
                 ).fetchone()
 
-            except sqlite3.Error as exc:
+            except psycopg.Error as exc:
                 raise DatabaseError(
                     "Impossible de vérifier la conversation."
                 ) from exc
@@ -528,24 +534,53 @@ class MemoryService:
 
     @staticmethod
     def _row_to_dict(
-        row: sqlite3.Row,
+        row: dict[str, Any],
     ) -> dict[str, Any]:
-        raw_value = row["memory_value"]
 
-        try:
-            value = json.loads(raw_value)
-        except (TypeError, json.JSONDecodeError):
-            value = raw_value
+        raw_metadata = row.get("metadata")
+
+        metadata: dict[str, Any] = {}
+
+        if raw_metadata:
+            try:
+                if isinstance(raw_metadata, str):
+                    metadata = json.loads(raw_metadata)
+                elif isinstance(raw_metadata, dict):
+                    metadata = raw_metadata
+
+            except (
+                TypeError,
+                json.JSONDecodeError,
+            ):
+                metadata = {}
+
+        value = metadata.get("value")
+
+        if "value" not in metadata:
+            raw_content = row.get("content")
+
+            try:
+                value = json.loads(raw_content)
+            except (
+                TypeError,
+                json.JSONDecodeError,
+            ):
+                value = raw_content
+
+        key = metadata.get(
+            "key",
+            f"memory_{row['id']}",
+        )
 
         return {
             "id": row["id"],
             "user_id": row["user_id"],
             "contact_id": row["contact_id"],
             "conversation_id": row["conversation_id"],
-            "key": row["memory_key"],
+            "key": key,
             "value": value,
             "memory_type": row["memory_type"],
             "importance": row["importance"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
-        }
+    }
