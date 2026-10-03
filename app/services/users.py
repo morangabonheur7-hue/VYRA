@@ -1,8 +1,9 @@
 import hashlib
 import hmac
 import os
-import sqlite3
 from typing import Any
+
+import psycopg
 
 from app.core.errors import (
     ConflictError,
@@ -21,24 +22,14 @@ class UserService:
     """
     Service de gestion des utilisateurs VYRA.
 
-    Responsabilités :
-
-    - créer un utilisateur ;
-    - rechercher un utilisateur ;
-    - modifier son profil ;
-    - gérer son statut ;
-    - vérifier un mot de passe ;
-    - modifier un mot de passe.
-
-    Le service ne gère pas directement les tokens JWT.
-    Cette responsabilité appartiendra à api/auth.py.
+    Compatible PostgreSQL / Supabase.
     """
 
     PASSWORD_ALGORITHM = "scrypt"
 
     def __init__(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
     ) -> None:
         self.connection = connection
 
@@ -61,9 +52,7 @@ class UserService:
                 "Un compte existe déjà avec cette adresse email."
             )
 
-        password_hash = self.hash_password(
-            data.password
-        )
+        password_hash = self.hash_password(data.password)
 
         user = User(
             email=email,
@@ -90,7 +79,8 @@ class UserService:
                 updated_at,
                 last_login_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """
 
         values = (
@@ -101,26 +91,26 @@ class UserService:
             user.phone,
             user.business_name,
             user.business_description,
-            int(user.is_active),
-            int(user.is_verified),
+            user.is_active,
+            user.is_verified,
             user.created_at.isoformat(),
             user.updated_at.isoformat(),
             None,
         )
 
         try:
-            cursor = self.connection.execute(
+            row = self.connection.execute(
                 query,
                 values,
-            )
+            ).fetchone()
 
             self.connection.commit()
 
-            user.id = cursor.lastrowid
+            user.id = int(row["id"])
 
             return user
 
-        except sqlite3.IntegrityError as exc:
+        except psycopg.IntegrityError as exc:
             self.connection.rollback()
 
             raise ConflictError(
@@ -130,12 +120,11 @@ class UserService:
                 },
             ) from exc
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
-                "Une erreur est survenue lors de "
-                "la création du compte."
+                "Une erreur est survenue lors de la création du compte."
             ) from exc
 
     # ------------------------------------------------------------------
@@ -153,7 +142,7 @@ class UserService:
         query = """
             SELECT *
             FROM users
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
         """
 
@@ -163,7 +152,7 @@ class UserService:
                 (user_id,),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer l'utilisateur."
             ) from exc
@@ -183,14 +172,12 @@ class UserService:
         Récupère un utilisateur à partir de son email.
         """
 
-        normalized_email = (
-            email.strip().lower()
-        )
+        normalized_email = email.strip().lower()
 
         query = """
             SELECT *
             FROM users
-            WHERE email = ?
+            WHERE email = %s
             LIMIT 1
         """
 
@@ -200,15 +187,14 @@ class UserService:
                 (normalized_email,),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de rechercher l'utilisateur."
             ) from exc
 
         if row is None:
             raise UserNotFoundError(
-                "Aucun utilisateur ne correspond "
-                "à cette adresse email."
+                "Aucun utilisateur ne correspond à cette adresse email."
             )
 
         return User.from_row(row)
@@ -221,14 +207,12 @@ class UserService:
         Vérifie si une adresse email est déjà utilisée.
         """
 
-        normalized_email = (
-            email.strip().lower()
-        )
+        normalized_email = email.strip().lower()
 
         query = """
             SELECT 1
             FROM users
-            WHERE email = ?
+            WHERE email = %s
             LIMIT 1
         """
 
@@ -238,7 +222,7 @@ class UserService:
                 (normalized_email,),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de vérifier l'adresse email."
             ) from exc
@@ -257,15 +241,9 @@ class UserService:
     ) -> User:
         """
         Vérifie les identifiants d'un utilisateur.
-
-        Retourne l'utilisateur si les identifiants sont corrects.
         """
 
-        try:
-            user = self.get_user_by_email(email)
-
-        except UserNotFoundError:
-            raise
+        user = self.get_user_by_email(email)
 
         if not self.verify_password(
             password,
@@ -310,18 +288,10 @@ class UserService:
             return user
 
         user.update_profile(
-            first_name=update_data.get(
-                "first_name"
-            ),
-            last_name=update_data.get(
-                "last_name"
-            ),
-            phone=update_data.get(
-                "phone"
-            ),
-            business_name=update_data.get(
-                "business_name"
-            ),
+            first_name=update_data.get("first_name"),
+            last_name=update_data.get("last_name"),
+            phone=update_data.get("phone"),
+            business_name=update_data.get("business_name"),
             business_description=update_data.get(
                 "business_description"
             ),
@@ -330,13 +300,13 @@ class UserService:
         query = """
             UPDATE users
             SET
-                first_name = ?,
-                last_name = ?,
-                phone = ?,
-                business_name = ?,
-                business_description = ?,
-                updated_at = ?
-            WHERE id = ?
+                first_name = %s,
+                last_name = %s,
+                phone = %s,
+                business_name = %s,
+                business_description = %s,
+                updated_at = %s
+            WHERE id = %s
         """
 
         try:
@@ -355,7 +325,7 @@ class UserService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -415,16 +385,16 @@ class UserService:
         query = """
             UPDATE users
             SET
-                is_verified = ?,
-                updated_at = ?
-            WHERE id = ?
+                is_verified = %s,
+                updated_at = %s
+            WHERE id = %s
         """
 
         try:
             self.connection.execute(
                 query,
                 (
-                    int(user.is_verified),
+                    user.is_verified,
                     user.updated_at.isoformat(),
                     user.id,
                 ),
@@ -432,7 +402,7 @@ class UserService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -476,9 +446,9 @@ class UserService:
         query = """
             UPDATE users
             SET
-                password_hash = ?,
-                updated_at = ?
-            WHERE id = ?
+                password_hash = %s,
+                updated_at = %s
+            WHERE id = %s
         """
 
         try:
@@ -493,7 +463,7 @@ class UserService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -514,7 +484,7 @@ class UserService:
         """
         Hash sécurisé du mot de passe avec scrypt.
 
-        Le format stocké est :
+        Format :
 
         scrypt$N$r$p$salt$hash
         """
@@ -526,8 +496,7 @@ class UserService:
 
         if len(password) < 8:
             raise ValueError(
-                "Le mot de passe doit contenir "
-                "au moins 8 caractères."
+                "Le mot de passe doit contenir au moins 8 caractères."
             )
 
         salt = os.urandom(16)
@@ -577,13 +546,8 @@ class UserService:
             if algorithm != cls.PASSWORD_ALGORITHM:
                 return False
 
-            salt = bytes.fromhex(
-                salt_hex
-            )
-
-            expected_hash = bytes.fromhex(
-                hash_hex
-            )
+            salt = bytes.fromhex(salt_hex)
+            expected_hash = bytes.fromhex(hash_hex)
 
             derived_key = hashlib.scrypt(
                 password.encode("utf-8"),
@@ -617,9 +581,9 @@ class UserService:
         query = """
             UPDATE users
             SET
-                last_login_at = ?,
-                updated_at = ?
-            WHERE id = ?
+                last_login_at = %s,
+                updated_at = %s
+            WHERE id = %s
         """
 
         try:
@@ -636,7 +600,7 @@ class UserService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -650,16 +614,16 @@ class UserService:
         query = """
             UPDATE users
             SET
-                is_active = ?,
-                updated_at = ?
-            WHERE id = ?
+                is_active = %s,
+                updated_at = %s
+            WHERE id = %s
         """
 
         try:
             self.connection.execute(
                 query,
                 (
-                    int(user.is_active),
+                    user.is_active,
                     user.updated_at.isoformat(),
                     user.id,
                 ),
@@ -667,10 +631,9 @@ class UserService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
-                "Impossible de modifier le statut "
-                "de l'utilisateur."
+                "Impossible de modifier le statut de l'utilisateur."
             ) from exc
