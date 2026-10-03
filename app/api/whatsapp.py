@@ -1,5 +1,5 @@
 import logging
-import sqlite3
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter
@@ -15,6 +15,7 @@ router = APIRouter(
 )
 
 logger = logging.getLogger("vyra.whatsapp")
+
 
 SYSTEM_PROMPT = """
 Tu es VYRA, un assistant IA commercial et personnel.
@@ -39,11 +40,11 @@ nécessaire.
 """.strip()
 
 
-def _get_active_user_id(connection: sqlite3.Connection) -> int:
+def _get_active_user_id(connection: Any) -> int:
     query = """
         SELECT id
         FROM users
-        WHERE is_active = 1
+        WHERE is_active = TRUE
         ORDER BY id ASC
         LIMIT 1
     """
@@ -59,7 +60,7 @@ def _get_active_user_id(connection: sqlite3.Connection) -> int:
 
 
 def _get_or_create_contact(
-    connection: sqlite3.Connection,
+    connection: Any,
     *,
     user_id: int,
     sender: str,
@@ -67,18 +68,19 @@ def _get_or_create_contact(
     query = """
         SELECT id
         FROM contacts
-        WHERE user_id = ?
-          AND phone = ?
-          AND is_archived = 0
+        WHERE user_id = %s
+          AND phone = %s
+          AND is_archived = FALSE
         LIMIT 1
     """
 
-    row = connection.execute(query, (user_id, sender)).fetchone()
+    row = connection.execute(
+        query,
+        (user_id, sender),
+    ).fetchone()
 
     if row is not None:
         return int(row["id"])
-
-    from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -94,10 +96,21 @@ def _get_or_create_contact(
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+        VALUES (
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            FALSE,
+            %s,
+            %s
+        )
+        RETURNING id
     """
 
-    cursor = connection.execute(
+    row = connection.execute(
         insert_query,
         (
             user_id,
@@ -109,20 +122,20 @@ def _get_or_create_contact(
             now,
             now,
         ),
-    )
+    ).fetchone()
 
     connection.commit()
 
-    if cursor.lastrowid is None:
+    if row is None:
         raise VYRAError(
             message="Impossible de créer le contact WhatsApp.",
         )
 
-    return int(cursor.lastrowid)
+    return int(row["id"])
 
 
 def _get_or_create_conversation(
-    connection: sqlite3.Connection,
+    connection: Any,
     *,
     user_id: int,
     contact_id: int,
@@ -130,11 +143,11 @@ def _get_or_create_conversation(
     query = """
         SELECT id
         FROM conversations
-        WHERE user_id = ?
-          AND contact_id = ?
+        WHERE user_id = %s
+          AND contact_id = %s
           AND channel = 'whatsapp'
           AND status = 'active'
-          AND is_archived = 0
+          AND is_archived = FALSE
         ORDER BY id DESC
         LIMIT 1
     """
@@ -146,8 +159,6 @@ def _get_or_create_conversation(
 
     if row is not None:
         return int(row["id"])
-
-    from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -162,22 +173,37 @@ def _get_or_create_conversation(
             created_at,
             updated_at
         )
-        VALUES (?, ?, 'whatsapp', 'active', 1, 0, ?, ?)
+        VALUES (
+            %s,
+            %s,
+            'whatsapp',
+            'active',
+            TRUE,
+            FALSE,
+            %s,
+            %s
+        )
+        RETURNING id
     """
 
-    cursor = connection.execute(
+    row = connection.execute(
         insert_query,
-        (user_id, contact_id, now, now),
-    )
+        (
+            user_id,
+            contact_id,
+            now,
+            now,
+        ),
+    ).fetchone()
 
     connection.commit()
 
-    if cursor.lastrowid is None:
+    if row is None:
         raise VYRAError(
             message="Impossible de créer la conversation WhatsApp.",
         )
 
-    return int(cursor.lastrowid)
+    return int(row["id"])
 
 
 @router.post("/webhook")
@@ -197,7 +223,9 @@ async def whatsapp_webhook(
     ).strip()
 
     if not message:
-        logger.info("WhatsApp webhook received an empty message")
+        logger.info(
+            "WhatsApp webhook received an empty message"
+        )
         return {"replies": []}
 
     sender = str(
@@ -226,7 +254,9 @@ async def whatsapp_webhook(
             user_id,
         )
 
-        logger.info("Step 2: getting or creating contact")
+        logger.info(
+            "Step 2: getting or creating contact"
+        )
 
         contact_id = _get_or_create_contact(
             connection,
@@ -239,7 +269,9 @@ async def whatsapp_webhook(
             contact_id,
         )
 
-        logger.info("Step 3: getting or creating conversation")
+        logger.info(
+            "Step 3: getting or creating conversation"
+        )
 
         conversation_id = _get_or_create_conversation(
             connection,
@@ -254,7 +286,9 @@ async def whatsapp_webhook(
 
         message_service = MessageService(connection)
 
-        logger.info("Step 4: saving incoming message")
+        logger.info(
+            "Step 4: saving incoming message"
+        )
 
         message_service.create_incoming_message(
             conversation_id=conversation_id,
@@ -272,7 +306,9 @@ async def whatsapp_webhook(
 
         logger.info("Step 4 OK")
 
-        logger.info("Step 5: building AI context")
+        logger.info(
+            "Step 5: building AI context"
+        )
 
         history = message_service.get_ai_context(
             conversation_id=conversation_id,
@@ -284,7 +320,9 @@ async def whatsapp_webhook(
             len(history),
         )
 
-        logger.info("Step 6: calling Gemini through VYRA")
+        logger.info(
+            "Step 6: calling Gemini through VYRA"
+        )
 
         response = ai_gateway.generate(
             AIRequest(
@@ -307,7 +345,9 @@ async def whatsapp_webhook(
                 "Comment puis-je vous aider ?"
             )
 
-        logger.info("Step 7: saving AI response")
+        logger.info(
+            "Step 7: saving AI response"
+        )
 
         message_service.create_ai_draft(
             conversation_id=conversation_id,
@@ -321,7 +361,9 @@ async def whatsapp_webhook(
 
         logger.info("Step 7 OK")
 
-        logger.info("VYRA WhatsApp webhook completed successfully")
+        logger.info(
+            "VYRA WhatsApp webhook completed successfully"
+        )
 
         return {
             "replies": [
@@ -352,4 +394,7 @@ async def whatsapp_webhook(
 
     finally:
         connection.close()
-        logger.info("WhatsApp database connection closed")
+
+        logger.info(
+            "WhatsApp database connection closed"
+    )
