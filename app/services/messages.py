@@ -1,13 +1,13 @@
 import json
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any
+
+import psycopg
 
 from app.core.errors import DatabaseError
 from app.models.message import (
     Message,
     MessageRole,
-    MessageSender,
 )
 
 
@@ -26,7 +26,7 @@ class MessageService:
 
     def __init__(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
     ) -> None:
         self.connection = connection
 
@@ -48,7 +48,11 @@ class MessageService:
                 updated_at,
                 sent_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s
+            )
+            RETURNING id
         """
 
         metadata = json.dumps(
@@ -69,9 +73,9 @@ class MessageService:
             message.role.value,
             message.content,
             message.status.value,
-            int(message.is_ai_generated),
-            int(message.requires_approval),
-            int(message.approved_by_user),
+            message.is_ai_generated,
+            message.requires_approval,
+            message.approved_by_user,
             approved_at,
             message.external_message_id,
             metadata,
@@ -83,17 +87,18 @@ class MessageService:
         )
 
         try:
-            cursor = self.connection.execute(
+            row = self.connection.execute(
                 query,
                 values,
-            )
+            ).fetchone()
+
             self.connection.commit()
 
-            message.id = cursor.lastrowid
+            message.id = row["id"]
 
             return message
 
-        except sqlite3.IntegrityError as exc:
+        except psycopg.IntegrityError as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -103,7 +108,7 @@ class MessageService:
                 },
             ) from exc
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -120,7 +125,7 @@ class MessageService:
         query = """
             SELECT *
             FROM messages
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
         """
 
@@ -130,7 +135,7 @@ class MessageService:
                 (message_id,),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer le message."
             ) from exc
@@ -152,18 +157,21 @@ class MessageService:
         query = """
             SELECT *
             FROM messages
-            WHERE conversation_id = ?
+            WHERE conversation_id = %s
             ORDER BY created_at DESC
-            LIMIT ?
+            LIMIT %s
         """
 
         try:
             rows = self.connection.execute(
                 query,
-                (conversation_id, limit),
+                (
+                    conversation_id,
+                    limit,
+                ),
             ).fetchall()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer "
                 "l'historique de la conversation."
@@ -278,7 +286,7 @@ class MessageService:
         query = """
             SELECT *
             FROM messages
-            WHERE external_message_id = ?
+            WHERE external_message_id = %s
             LIMIT 1
         """
 
@@ -288,7 +296,7 @@ class MessageService:
                 (external_message_id,),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de rechercher "
                 "le message externe."
@@ -313,18 +321,18 @@ class MessageService:
         query = """
             UPDATE messages
             SET
-                content = ?,
-                role = ?,
-                status = ?,
-                is_ai_generated = ?,
-                requires_human_validation = ?,
-                is_approved = ?,
-                approved_at = ?,
-                external_message_id = ?,
-                metadata = ?,
-                updated_at = ?,
-                sent_at = ?
-            WHERE id = ?
+                content = %s,
+                role = %s,
+                status = %s,
+                is_ai_generated = %s,
+                requires_human_validation = %s,
+                is_approved = %s,
+                approved_at = %s,
+                external_message_id = %s,
+                metadata = %s,
+                updated_at = %s,
+                sent_at = %s
+            WHERE id = %s
         """
 
         metadata = json.dumps(
@@ -343,9 +351,9 @@ class MessageService:
             message.content,
             message.role.value,
             message.status.value,
-            int(message.is_ai_generated),
-            int(message.requires_approval),
-            int(message.approved_by_user),
+            message.is_ai_generated,
+            message.requires_approval,
+            message.approved_by_user,
             approved_at,
             message.external_message_id,
             metadata,
@@ -366,7 +374,7 @@ class MessageService:
 
             return message
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -438,7 +446,7 @@ class MessageService:
 
         query = """
             DELETE FROM messages
-            WHERE id = ?
+            WHERE id = %s
         """
 
         try:
@@ -449,7 +457,7 @@ class MessageService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -459,4 +467,4 @@ class MessageService:
         if cursor.rowcount == 0:
             raise DatabaseError(
                 "Message introuvable."
-    )
+)
