@@ -1,5 +1,6 @@
-import sqlite3
 from typing import Any
+
+import psycopg
 
 from app.core.errors import (
     ConflictError,
@@ -27,7 +28,7 @@ class ConversationService:
 
     def __init__(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
     ) -> None:
         self.connection = connection
 
@@ -86,7 +87,11 @@ class ConversationService:
                 last_message_at,
                 closed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s
+            )
+            RETURNING id
         """
 
         values = (
@@ -96,8 +101,8 @@ class ConversationService:
             conversation.status.value,
             conversation.subject,
             conversation.summary,
-            int(conversation.ai_enabled),
-            int(conversation.is_archived),
+            conversation.ai_enabled,
+            conversation.is_archived,
             conversation.created_at.isoformat(),
             conversation.updated_at.isoformat(),
             None,
@@ -105,22 +110,24 @@ class ConversationService:
         )
 
         try:
-            cursor = self.connection.execute(
+            row = self.connection.execute(
                 query,
                 values,
-            )
+            ).fetchone()
+
             self.connection.commit()
-            conversation.id = cursor.lastrowid
+
+            conversation.id = row["id"]
             return conversation
 
-        except sqlite3.IntegrityError as exc:
+        except psycopg.IntegrityError as exc:
             self.connection.rollback()
             raise ConflictError(
                 "Impossible de créer cette conversation.",
                 details={"database_error": str(exc)},
             ) from exc
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Une erreur est survenue lors de la création "
@@ -144,8 +151,8 @@ class ConversationService:
         query = """
             SELECT *
             FROM conversations
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
             LIMIT 1
         """
 
@@ -158,7 +165,7 @@ class ConversationService:
                 ),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer la conversation."
             ) from exc
@@ -192,22 +199,22 @@ class ConversationService:
         page_size = min(max(page_size, 1), 100)
         offset = (page - 1) * page_size
 
-        conditions = ["user_id = ?"]
+        conditions = ["user_id = %s"]
         parameters: list[Any] = [user_id]
 
         if not include_archived:
-            conditions.append("is_archived = 0")
+            conditions.append("is_archived = FALSE")
 
         if status is not None:
-            conditions.append("status = ?")
+            conditions.append("status = %s")
             parameters.append(status.value)
 
         if channel is not None:
-            conditions.append("channel = ?")
+            conditions.append("channel = %s")
             parameters.append(channel.value)
 
         if contact_id is not None:
-            conditions.append("contact_id = ?")
+            conditions.append("contact_id = %s")
             parameters.append(contact_id)
 
         if search:
@@ -216,8 +223,8 @@ class ConversationService:
             conditions.append(
                 """
                 (
-                    subject LIKE ?
-                    OR summary LIKE ?
+                    subject ILIKE %s
+                    OR summary ILIKE %s
                 )
                 """
             )
@@ -232,7 +239,7 @@ class ConversationService:
         where_clause = " AND ".join(conditions)
 
         count_query = f"""
-            SELECT COUNT(*)
+            SELECT COUNT(*) AS total
             FROM conversations
             WHERE {where_clause}
         """
@@ -243,16 +250,16 @@ class ConversationService:
             WHERE {where_clause}
             ORDER BY
                 COALESCE(last_message_at, created_at) DESC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         """
 
         try:
-            total = int(
-                self.connection.execute(
-                    count_query,
-                    parameters,
-                ).fetchone()[0]
-            )
+            count_row = self.connection.execute(
+                count_query,
+                parameters,
+            ).fetchone()
+
+            total = int(count_row["total"])
 
             rows = self.connection.execute(
                 data_query,
@@ -263,7 +270,7 @@ class ConversationService:
                 ],
             ).fetchall()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer les conversations."
             ) from exc
@@ -287,8 +294,8 @@ class ConversationService:
         """
 
         conditions = [
-            "user_id = ?",
-            "contact_id = ?",
+            "user_id = %s",
+            "contact_id = %s",
         ]
 
         parameters: list[Any] = [
@@ -297,7 +304,7 @@ class ConversationService:
         ]
 
         if not include_archived:
-            conditions.append("is_archived = 0")
+            conditions.append("is_archived = FALSE")
 
         query = f"""
             SELECT *
@@ -313,7 +320,7 @@ class ConversationService:
                 parameters,
             ).fetchall()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer les conversations "
                 "du contact."
@@ -362,16 +369,16 @@ class ConversationService:
         query = """
             UPDATE conversations
             SET
-                channel = ?,
-                status = ?,
-                subject = ?,
-                summary = ?,
-                ai_enabled = ?,
-                is_archived = ?,
-                updated_at = ?,
-                closed_at = ?
-            WHERE id = ?
-              AND user_id = ?
+                channel = %s,
+                status = %s,
+                subject = %s,
+                summary = %s,
+                ai_enabled = %s,
+                is_archived = %s,
+                updated_at = %s,
+                closed_at = %s
+            WHERE id = %s
+              AND user_id = %s
         """
 
         values = (
@@ -379,8 +386,8 @@ class ConversationService:
             conversation.status.value,
             conversation.subject,
             conversation.summary,
-            int(conversation.ai_enabled),
-            int(conversation.is_archived),
+            conversation.ai_enabled,
+            conversation.is_archived,
             conversation.updated_at.isoformat(),
             (
                 conversation.closed_at.isoformat()
@@ -398,7 +405,7 @@ class ConversationService:
             )
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Impossible de modifier la conversation."
@@ -422,7 +429,6 @@ class ConversationService:
         )
 
         conversation.activate()
-
         self._save_conversation_state(conversation)
 
         return conversation
@@ -439,7 +445,6 @@ class ConversationService:
         )
 
         conversation.mark_as_waiting()
-
         self._save_conversation_state(conversation)
 
         return conversation
@@ -456,7 +461,6 @@ class ConversationService:
         )
 
         conversation.close()
-
         self._save_conversation_state(conversation)
 
         return conversation
@@ -481,7 +485,6 @@ class ConversationService:
         )
 
         conversation.enable_ai()
-
         self._save_conversation_state(conversation)
 
         return conversation
@@ -502,7 +505,6 @@ class ConversationService:
         )
 
         conversation.disable_ai()
-
         self._save_conversation_state(conversation)
 
         return conversation
@@ -555,7 +557,6 @@ class ConversationService:
         )
 
         conversation.update_summary(summary)
-
         self._save_conversation_state(conversation)
 
         return conversation
@@ -576,7 +577,6 @@ class ConversationService:
         )
 
         conversation.archive()
-
         self._save_conversation_state(conversation)
 
         return conversation
@@ -593,7 +593,6 @@ class ConversationService:
         )
 
         conversation.unarchive()
-
         self._save_conversation_state(conversation)
 
         return conversation
@@ -610,9 +609,6 @@ class ConversationService:
     ) -> None:
         """
         Supprime définitivement une conversation.
-
-        Cette opération sera utilisée avec prudence car les messages
-        associés devront également être traités correctement.
         """
 
         self.get_conversation(
@@ -622,8 +618,8 @@ class ConversationService:
 
         query = """
             DELETE FROM conversations
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
@@ -636,7 +632,7 @@ class ConversationService:
             )
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Impossible de supprimer la conversation."
@@ -661,8 +657,8 @@ class ConversationService:
         query = """
             SELECT id
             FROM contacts
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
             LIMIT 1
         """
 
@@ -675,7 +671,7 @@ class ConversationService:
                 ),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de vérifier le contact."
             ) from exc
@@ -696,11 +692,11 @@ class ConversationService:
         query = """
             SELECT 1
             FROM conversations
-            WHERE user_id = ?
-              AND contact_id = ?
-              AND channel = ?
-              AND is_archived = 0
-              AND status != ?
+            WHERE user_id = %s
+              AND contact_id = %s
+              AND channel = %s
+              AND is_archived = FALSE
+              AND status != %s
             LIMIT 1
         """
 
@@ -715,7 +711,7 @@ class ConversationService:
                 ),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de vérifier la conversation existante."
             ) from exc
@@ -729,14 +725,14 @@ class ConversationService:
         query = """
             UPDATE conversations
             SET
-                status = ?,
-                ai_enabled = ?,
-                is_archived = ?,
-                updated_at = ?,
-                last_message_at = ?,
-                closed_at = ?
-            WHERE id = ?
-              AND user_id = ?
+                status = %s,
+                ai_enabled = %s,
+                is_archived = %s,
+                updated_at = %s,
+                last_message_at = %s,
+                closed_at = %s
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
@@ -744,8 +740,8 @@ class ConversationService:
                 query,
                 (
                     conversation.status.value,
-                    int(conversation.ai_enabled),
-                    int(conversation.is_archived),
+                    conversation.ai_enabled,
+                    conversation.is_archived,
                     conversation.updated_at.isoformat(),
                     (
                         conversation.last_message_at.isoformat()
@@ -763,7 +759,7 @@ class ConversationService:
             )
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Impossible de sauvegarder l'état "
