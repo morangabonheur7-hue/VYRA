@@ -575,6 +575,41 @@ def _create_tables(connection) -> None:
         connection.execute(query)
 
 
+def _migrate_existing_tables(connection) -> None:
+    migrations = [
+
+        # ============================================================
+        # EXISTING USERS TABLE
+        # ============================================================
+
+        """
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS company_id BIGINT
+        """,
+
+        # ============================================================
+        # EXISTING CONTACTS TABLE
+        # ============================================================
+
+        """
+        ALTER TABLE contacts
+        ADD COLUMN IF NOT EXISTS company_id BIGINT
+        """,
+
+        # ============================================================
+        # EXISTING CONVERSATIONS TABLE
+        # ============================================================
+
+        """
+        ALTER TABLE conversations
+        ADD COLUMN IF NOT EXISTS company_id BIGINT
+        """,
+    ]
+
+    for query in migrations:
+        connection.execute(query)
+
+
 def _create_indexes(connection) -> None:
     indexes = [
 
@@ -863,6 +898,7 @@ def initialize_database() -> None:
 
     try:
         _create_tables(connection)
+        _migrate_existing_tables(connection)
         _create_indexes(connection)
         connection.commit()
 
