@@ -1,6 +1,7 @@
-import sqlite3
 from datetime import datetime
 from typing import Any
+
+import psycopg
 
 from app.core.errors import (
     DatabaseError,
@@ -27,7 +28,7 @@ class TaskService:
 
     def __init__(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
     ) -> None:
         self.connection = connection
 
@@ -41,9 +42,6 @@ class TaskService:
         user_id: int,
         data: TaskCreate,
     ) -> Task:
-        """
-        Crée une tâche pour un utilisateur.
-        """
 
         self._validate_related_entities(
             user_id=user_id,
@@ -78,7 +76,11 @@ class TaskService:
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s
+            )
+            RETURNING id
         """
 
         values = (
@@ -89,34 +91,39 @@ class TaskService:
             task.priority.value,
             task.contact_id,
             task.conversation_id,
-            task.due_at.isoformat() if task.due_at else None,
+            task.due_at.isoformat()
+            if task.due_at
+            else None,
             None,
-            int(task.reminder_enabled),
-            int(task.reminder_sent),
+            task.reminder_enabled,
+            task.reminder_sent,
             task.created_at.isoformat(),
             task.updated_at.isoformat(),
         )
 
         try:
-            cursor = self.connection.execute(
+            row = self.connection.execute(
                 query,
                 values,
-            )
+            ).fetchone()
+
             self.connection.commit()
 
-            task.id = cursor.lastrowid
+            task.id = row["id"]
 
             return task
 
-        except sqlite3.IntegrityError as exc:
+        except psycopg.IntegrityError as exc:
             self.connection.rollback()
 
             raise DatabaseError(
                 "Impossible de créer la tâche.",
-                details={"database_error": str(exc)},
+                details={
+                    "database_error": str(exc),
+                },
             ) from exc
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -134,15 +141,12 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
-        """
-        Récupère une tâche appartenant à l'utilisateur.
-        """
 
         query = """
             SELECT *
             FROM tasks
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
             LIMIT 1
         """
 
@@ -155,7 +159,7 @@ class TaskService:
                 ),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer la tâche."
             ) from exc
@@ -179,40 +183,36 @@ class TaskService:
         conversation_id: int | None = None,
         overdue_only: bool = False,
     ) -> tuple[list[Task], int]:
-        """
-        Retourne les tâches d'un utilisateur avec filtres
-        et pagination.
-        """
 
         page = max(page, 1)
         page_size = min(max(page_size, 1), 100)
         offset = (page - 1) * page_size
 
-        conditions = ["user_id = ?"]
+        conditions = ["user_id = %s"]
         parameters: list[Any] = [user_id]
 
         if status is not None:
-            conditions.append("status = ?")
+            conditions.append("status = %s")
             parameters.append(status.value)
 
         if priority is not None:
-            conditions.append("priority = ?")
+            conditions.append("priority = %s")
             parameters.append(priority.value)
 
         if contact_id is not None:
-            conditions.append("contact_id = ?")
+            conditions.append("contact_id = %s")
             parameters.append(contact_id)
 
         if conversation_id is not None:
-            conditions.append("conversation_id = ?")
+            conditions.append("conversation_id = %s")
             parameters.append(conversation_id)
 
         if overdue_only:
             conditions.append(
                 """
                 due_at IS NOT NULL
-                AND due_at < ?
-                AND status NOT IN (?, ?)
+                AND due_at < %s
+                AND status NOT IN (%s, %s)
                 """
             )
 
@@ -227,7 +227,7 @@ class TaskService:
         where_clause = " AND ".join(conditions)
 
         count_query = f"""
-            SELECT COUNT(*)
+            SELECT COUNT(*) AS total
             FROM tasks
             WHERE {where_clause}
         """
@@ -250,16 +250,16 @@ class TaskService:
                 END,
                 due_at ASC,
                 created_at DESC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         """
 
         try:
-            total = int(
-                self.connection.execute(
-                    count_query,
-                    parameters,
-                ).fetchone()[0]
-            )
+            count_row = self.connection.execute(
+                count_query,
+                parameters,
+            ).fetchone()
+
+            total = int(count_row["total"])
 
             rows = self.connection.execute(
                 data_query,
@@ -270,7 +270,7 @@ class TaskService:
                 ],
             ).fetchall()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer les tâches."
             ) from exc
@@ -288,24 +288,20 @@ class TaskService:
         user_id: int,
         limit: int = 100,
     ) -> list[Task]:
-        """
-        Retourne les tâches arrivées à échéance
-        et qui peuvent nécessiter un rappel.
-        """
 
         limit = min(max(limit, 1), 500)
 
         query = """
             SELECT *
             FROM tasks
-            WHERE user_id = ?
+            WHERE user_id = %s
               AND due_at IS NOT NULL
-              AND due_at <= ?
-              AND reminder_enabled = 1
-              AND reminder_sent = 0
-              AND status NOT IN (?, ?)
+              AND due_at <= %s
+              AND reminder_enabled = TRUE
+              AND reminder_sent = FALSE
+              AND status NOT IN (%s, %s)
             ORDER BY due_at ASC
-            LIMIT ?
+            LIMIT %s
         """
 
         try:
@@ -320,7 +316,7 @@ class TaskService:
                 ),
             ).fetchall()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer les rappels à envoyer."
             ) from exc
@@ -341,9 +337,6 @@ class TaskService:
         task_id: int,
         data: TaskUpdate,
     ) -> Task:
-        """
-        Modifie une tâche.
-        """
 
         task = self.get_task(
             user_id=user_id,
@@ -390,6 +383,7 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -407,6 +401,7 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -424,6 +419,7 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -441,6 +437,7 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -462,6 +459,7 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -479,6 +477,7 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -496,6 +495,7 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -518,6 +518,7 @@ class TaskService:
         task_id: int,
         due_at: datetime | None,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -535,6 +536,7 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> Task:
+
         task = self.get_task(
             user_id=user_id,
             task_id=task_id,
@@ -556,9 +558,6 @@ class TaskService:
         user_id: int,
         task_id: int,
     ) -> None:
-        """
-        Supprime définitivement une tâche.
-        """
 
         self.get_task(
             user_id=user_id,
@@ -567,8 +566,8 @@ class TaskService:
 
         query = """
             DELETE FROM tasks
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
@@ -579,9 +578,10 @@ class TaskService:
                     user_id,
                 ),
             )
+
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
@@ -604,17 +604,13 @@ class TaskService:
         contact_id: int | None,
         conversation_id: int | None,
     ) -> None:
-        """
-        Vérifie que les ressources liées appartiennent
-        bien au même utilisateur.
-        """
 
         if contact_id is not None:
             query = """
                 SELECT id
                 FROM contacts
-                WHERE id = ?
-                  AND user_id = ?
+                WHERE id = %s
+                  AND user_id = %s
                 LIMIT 1
             """
 
@@ -627,7 +623,7 @@ class TaskService:
                     ),
                 ).fetchone()
 
-            except sqlite3.Error as exc:
+            except psycopg.Error as exc:
                 raise DatabaseError(
                     "Impossible de vérifier le contact."
                 ) from exc
@@ -642,8 +638,8 @@ class TaskService:
             query = """
                 SELECT id
                 FROM conversations
-                WHERE id = ?
-                  AND user_id = ?
+                WHERE id = %s
+                  AND user_id = %s
                 LIMIT 1
             """
 
@@ -656,7 +652,7 @@ class TaskService:
                     ),
                 ).fetchone()
 
-            except sqlite3.Error as exc:
+            except psycopg.Error as exc:
                 raise DatabaseError(
                     "Impossible de vérifier la conversation."
                 ) from exc
@@ -671,22 +667,23 @@ class TaskService:
         self,
         task: Task,
     ) -> None:
+
         query = """
             UPDATE tasks
             SET
-                title = ?,
-                description = ?,
-                status = ?,
-                priority = ?,
-                contact_id = ?,
-                conversation_id = ?,
-                due_at = ?,
-                completed_at = ?,
-                reminder_enabled = ?,
-                reminder_sent = ?,
-                updated_at = ?
-            WHERE id = ?
-              AND user_id = ?
+                title = %s,
+                description = %s,
+                status = %s,
+                priority = %s,
+                contact_id = %s,
+                conversation_id = %s,
+                due_at = %s,
+                completed_at = %s,
+                reminder_enabled = %s,
+                reminder_sent = %s,
+                updated_at = %s
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
@@ -705,8 +702,8 @@ class TaskService:
                     task.completed_at.isoformat()
                     if task.completed_at
                     else None,
-                    int(task.reminder_enabled),
-                    int(task.reminder_sent),
+                    task.reminder_enabled,
+                    task.reminder_sent,
                     task.updated_at.isoformat(),
                     task.id,
                     task.user_id,
@@ -715,7 +712,7 @@ class TaskService:
 
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
 
             raise DatabaseError(
