@@ -1,5 +1,6 @@
-import sqlite3
 from typing import Any
+
+import psycopg
 
 from app.core.errors import (
     ConflictError,
@@ -18,7 +19,7 @@ class ContactService:
     afin que les routes API restent simples.
     """
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: Any) -> None:
         self.connection = connection
 
     # ------------------------------------------------------------------
@@ -76,7 +77,11 @@ class ContactService:
                 updated_at,
                 last_contacted_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s
+            )
+            RETURNING id
         """
 
         values = (
@@ -90,7 +95,7 @@ class ContactService:
             contact.status.value,
             contact.source.value,
             contact.notes,
-            int(contact.is_archived),
+            contact.is_archived,
             contact.created_at.isoformat(),
             contact.updated_at.isoformat(),
             (
@@ -101,19 +106,24 @@ class ContactService:
         )
 
         try:
-            cursor = self.connection.execute(query, values)
+            row = self.connection.execute(
+                query,
+                values,
+            ).fetchone()
+
             self.connection.commit()
-            contact.id = cursor.lastrowid
+
+            contact.id = row["id"]
             return contact
 
-        except sqlite3.IntegrityError as exc:
+        except psycopg.IntegrityError as exc:
             self.connection.rollback()
             raise ConflictError(
                 "Impossible de créer ce contact.",
                 details={"database_error": str(exc)},
             ) from exc
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Une erreur est survenue lors de la création du contact."
@@ -136,8 +146,8 @@ class ContactService:
         query = """
             SELECT *
             FROM contacts
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
             LIMIT 1
         """
 
@@ -147,7 +157,7 @@ class ContactService:
                 (contact_id, user_id),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer le contact."
             ) from exc
@@ -179,18 +189,18 @@ class ContactService:
         page_size = min(max(page_size, 1), 100)
         offset = (page - 1) * page_size
 
-        conditions = ["user_id = ?"]
+        conditions = ["user_id = %s"]
         parameters: list[Any] = [user_id]
 
         if not include_archived:
-            conditions.append("is_archived = 0")
+            conditions.append("is_archived = FALSE")
 
         if status is not None:
-            conditions.append("status = ?")
+            conditions.append("status = %s")
             parameters.append(status.value)
 
         if source is not None:
-            conditions.append("source = ?")
+            conditions.append("source = %s")
             parameters.append(source.value)
 
         if search:
@@ -199,11 +209,11 @@ class ContactService:
             conditions.append(
                 """
                 (
-                    first_name LIKE ?
-                    OR last_name LIKE ?
-                    OR company_name LIKE ?
-                    OR email LIKE ?
-                    OR phone LIKE ?
+                    first_name ILIKE %s
+                    OR last_name ILIKE %s
+                    OR company_name ILIKE %s
+                    OR email ILIKE %s
+                    OR phone ILIKE %s
                 )
                 """
             )
@@ -221,7 +231,7 @@ class ContactService:
         where_clause = " AND ".join(conditions)
 
         count_query = f"""
-            SELECT COUNT(*)
+            SELECT COUNT(*) AS total
             FROM contacts
             WHERE {where_clause}
         """
@@ -231,23 +241,23 @@ class ContactService:
             FROM contacts
             WHERE {where_clause}
             ORDER BY updated_at DESC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         """
 
         try:
-            total = int(
-                self.connection.execute(
-                    count_query,
-                    parameters,
-                ).fetchone()[0]
-            )
+            count_row = self.connection.execute(
+                count_query,
+                parameters,
+            ).fetchone()
+
+            total = int(count_row["total"])
 
             rows = self.connection.execute(
                 data_query,
                 [*parameters, page_size, offset],
             ).fetchall()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de récupérer les contacts."
             ) from exc
@@ -292,10 +302,7 @@ class ContactService:
         if email is not None:
             email = str(email)
 
-        if (
-            email is not None
-            or phone is not None
-        ):
+        if email is not None or phone is not None:
             if self._contact_exists(
                 user_id=user_id,
                 email=email,
@@ -322,20 +329,20 @@ class ContactService:
         query = """
             UPDATE contacts
             SET
-                first_name = ?,
-                last_name = ?,
-                company_name = ?,
-                email = ?,
-                phone = ?,
-                position = ?,
-                status = ?,
-                source = ?,
-                notes = ?,
-                is_archived = ?,
-                updated_at = ?,
-                last_contacted_at = ?
-            WHERE id = ?
-              AND user_id = ?
+                first_name = %s,
+                last_name = %s,
+                company_name = %s,
+                email = %s,
+                phone = %s,
+                position = %s,
+                status = %s,
+                source = %s,
+                notes = %s,
+                is_archived = %s,
+                updated_at = %s,
+                last_contacted_at = %s
+            WHERE id = %s
+              AND user_id = %s
         """
 
         values = (
@@ -348,7 +355,7 @@ class ContactService:
             contact.status.value,
             contact.source.value,
             contact.notes,
-            int(contact.is_archived),
+            contact.is_archived,
             contact.updated_at.isoformat(),
             (
                 contact.last_contacted_at.isoformat()
@@ -363,7 +370,7 @@ class ContactService:
             self.connection.execute(query, values)
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Impossible de modifier le contact."
@@ -392,7 +399,6 @@ class ContactService:
         )
 
         contact.set_status(status)
-
         self._save_contact_status(contact)
 
         return contact
@@ -413,7 +419,6 @@ class ContactService:
         )
 
         contact.archive()
-
         self._save_archive_state(contact)
 
         return contact
@@ -434,7 +439,6 @@ class ContactService:
         )
 
         contact.unarchive()
-
         self._save_archive_state(contact)
 
         return contact
@@ -463,19 +467,21 @@ class ContactService:
         query = """
             UPDATE contacts
             SET
-                last_contacted_at = ?,
-                updated_at = ?
-            WHERE id = ?
-              AND user_id = ?
+                last_contacted_at = %s,
+                updated_at = %s
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
             self.connection.execute(
                 query,
                 (
-                    contact.last_contacted_at.isoformat()
-                    if contact.last_contacted_at
-                    else None,
+                    (
+                        contact.last_contacted_at.isoformat()
+                        if contact.last_contacted_at
+                        else None
+                    ),
                     contact.updated_at.isoformat(),
                     contact.id,
                     user_id,
@@ -483,7 +489,7 @@ class ContactService:
             )
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Impossible d'enregistrer l'activité du contact."
@@ -503,9 +509,6 @@ class ContactService:
     ) -> None:
         """
         Supprime définitivement un contact.
-
-        Cette opération sera utilisée avec prudence.
-        L'archivage reste préférable dans la majorité des cas.
         """
 
         self.get_contact(
@@ -515,8 +518,8 @@ class ContactService:
 
         query = """
             DELETE FROM contacts
-            WHERE id = ?
-              AND user_id = ?
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
@@ -526,7 +529,7 @@ class ContactService:
             )
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Impossible de supprimer le contact."
@@ -548,7 +551,7 @@ class ContactService:
         query = """
             SELECT id
             FROM users
-            WHERE id = ?
+            WHERE id = %s
             LIMIT 1
         """
 
@@ -558,7 +561,7 @@ class ContactService:
                 (user_id,),
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de vérifier l'utilisateur."
             ) from exc
@@ -577,17 +580,17 @@ class ContactService:
         phone: str | None = None,
         exclude_contact_id: int | None = None,
     ) -> bool:
-        conditions = ["user_id = ?"]
+        conditions = ["user_id = %s"]
         parameters: list[Any] = [user_id]
 
         identifiers = []
 
         if email:
-            identifiers.append("email = ?")
+            identifiers.append("email = %s")
             parameters.append(email)
 
         if phone:
-            identifiers.append("phone = ?")
+            identifiers.append("phone = %s")
             parameters.append(phone)
 
         if not identifiers:
@@ -598,7 +601,7 @@ class ContactService:
         )
 
         if exclude_contact_id is not None:
-            conditions.append("id != ?")
+            conditions.append("id != %s")
             parameters.append(exclude_contact_id)
 
         query = f"""
@@ -614,7 +617,7 @@ class ContactService:
                 parameters,
             ).fetchone()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             raise DatabaseError(
                 "Impossible de vérifier l'existence du contact."
             ) from exc
@@ -628,10 +631,10 @@ class ContactService:
         query = """
             UPDATE contacts
             SET
-                status = ?,
-                updated_at = ?
-            WHERE id = ?
-              AND user_id = ?
+                status = %s,
+                updated_at = %s
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
@@ -646,7 +649,7 @@ class ContactService:
             )
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Impossible de modifier le statut du contact."
@@ -659,18 +662,18 @@ class ContactService:
         query = """
             UPDATE contacts
             SET
-                is_archived = ?,
-                status = ?,
-                updated_at = ?
-            WHERE id = ?
-              AND user_id = ?
+                is_archived = %s,
+                status = %s,
+                updated_at = %s
+            WHERE id = %s
+              AND user_id = %s
         """
 
         try:
             self.connection.execute(
                 query,
                 (
-                    int(contact.is_archived),
+                    contact.is_archived,
                     contact.status.value,
                     contact.updated_at.isoformat(),
                     contact.id,
@@ -679,7 +682,7 @@ class ContactService:
             )
             self.connection.commit()
 
-        except sqlite3.Error as exc:
+        except psycopg.Error as exc:
             self.connection.rollback()
             raise DatabaseError(
                 "Impossible de modifier l'archivage du contact."
