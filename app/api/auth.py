@@ -2,9 +2,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import jwt
-import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from psycopg import Connection
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -120,7 +120,7 @@ def _build_tokens(user_id: int) -> TokenResponse:
 # ---------------------------------------------------------------------------
 
 def _service(
-    connection: sqlite3.Connection,
+    connection: Connection,
 ) -> UserService:
     return UserService(connection)
 
@@ -131,7 +131,7 @@ def _service(
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
-    connection: sqlite3.Connection = Depends(get_db),
+    connection: Connection = Depends(get_db),
 ) -> User:
     if credentials is None:
         raise HTTPException(
@@ -203,7 +203,7 @@ def get_current_user(
 )
 def register(
     data: UserCreate,
-    connection: sqlite3.Connection = Depends(get_db),
+    connection: Connection = Depends(get_db),
 ) -> UserLoginResponse:
     try:
         user = _service(connection).create_user(data)
@@ -234,7 +234,7 @@ def register(
 )
 def login(
     data: UserLogin,
-    connection: sqlite3.Connection = Depends(get_db),
+    connection: Connection = Depends(get_db),
 ) -> UserLoginResponse:
     try:
         user = _service(connection).authenticate(
@@ -284,7 +284,7 @@ def get_me(
 )
 def refresh_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
-    connection: sqlite3.Connection = Depends(get_db),
+    connection: Connection = Depends(get_db),
 ) -> TokenResponse:
     if credentials is None:
         raise HTTPException(
@@ -356,7 +356,7 @@ def refresh_token(
 def change_password(
     data: PasswordChange,
     current_user: User = Depends(get_current_user),
-    connection: sqlite3.Connection = Depends(get_db),
+    connection: Connection = Depends(get_db),
 ) -> UserResponse:
     try:
         user = _service(connection).change_password(
