@@ -1,56 +1,46 @@
-import sqlite3
-from pathlib import Path
 from typing import Generator
+
+import psycopg
+from psycopg.rows import dict_row
 
 from app.core.config import settings
 
 
-def get_database_path() -> Path:
+def get_database_url() -> str:
     """
-    Convertit l'URL SQLite configurée dans VYRA
-    en chemin réel vers le fichier de base de données.
+    Récupère l'URL PostgreSQL de Supabase.
     """
     database_url = settings.database_url
 
-    if not database_url.startswith("sqlite:///"):
+    if not database_url:
         raise ValueError(
-            "VYRA V1 utilise SQLite. "
-            "La database_url doit commencer par 'sqlite:///'."
+            "DATABASE_URL n'est pas configurée."
         )
 
-    database_path = database_url.replace("sqlite:///", "", 1)
+    if not database_url.startswith(("postgresql://", "postgres://")):
+        raise ValueError(
+            "VYRA utilise maintenant PostgreSQL. "
+            "DATABASE_URL doit être une URL PostgreSQL."
+        )
 
-    path = Path(database_path)
-
-    if not path.is_absolute():
-        path = Path.cwd() / path
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    return path
+    return database_url
 
 
-def create_connection() -> sqlite3.Connection:
+def create_connection():
     """
-    Crée une connexion SQLite configurée pour VYRA.
+    Crée une connexion PostgreSQL vers Supabase.
     """
-    database_path = get_database_path()
-
-    connection = sqlite3.connect(
-        database_path,
-        check_same_thread=False,
+    connection = psycopg.connect(
+        get_database_url(),
+        row_factory=dict_row,
     )
-
-    connection.row_factory = sqlite3.Row
-
-    connection.execute("PRAGMA foreign_keys = ON")
 
     return connection
 
 
-def get_db() -> Generator[sqlite3.Connection, None, None]:
+def get_db() -> Generator:
     """
-    Fournit une connexion à la base de données
+    Fournit une connexion PostgreSQL
     aux routes et services FastAPI.
     """
     connection = create_connection()
@@ -61,32 +51,34 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
         connection.close()
 
 
-def _create_tables(connection: sqlite3.Connection) -> None:
+def _create_tables(connection) -> None:
     """
     Crée les tables principales de VYRA V1.
     """
 
-    connection.executescript(
+    queries = [
         """
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            id BIGSERIAL PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             first_name TEXT NOT NULL,
             last_name TEXT NOT NULL DEFAULT '',
             phone TEXT,
             business_name TEXT,
             business_description TEXT,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            is_verified INTEGER NOT NULL DEFAULT 0,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            is_verified BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_login_at TEXT
-        );
+        )
+        """,
 
+        """
         CREATE TABLE IF NOT EXISTS contacts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
             first_name TEXT NOT NULL,
             last_name TEXT NOT NULL DEFAULT '',
             company_name TEXT,
@@ -96,7 +88,7 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'new',
             source TEXT NOT NULL DEFAULT 'manual',
             notes TEXT,
-            is_archived INTEGER NOT NULL DEFAULT 0,
+            is_archived BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_contacted_at TEXT,
@@ -104,18 +96,20 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (user_id)
                 REFERENCES users(id)
                 ON DELETE CASCADE
-        );
+        )
+        """,
 
+        """
         CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            contact_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            contact_id BIGINT NOT NULL,
             channel TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active',
             subject TEXT,
             summary TEXT,
-            ai_enabled INTEGER NOT NULL DEFAULT 1,
-            is_archived INTEGER NOT NULL DEFAULT 0,
+            ai_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            is_archived BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_message_at TEXT,
@@ -128,18 +122,20 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (contact_id)
                 REFERENCES contacts(id)
                 ON DELETE CASCADE
-        );
+        )
+        """,
 
+        """
         CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            conversation_id BIGINT NOT NULL,
             sender TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'received',
-            is_ai_generated INTEGER NOT NULL DEFAULT 0,
-            requires_human_validation INTEGER NOT NULL DEFAULT 0,
-            is_approved INTEGER NOT NULL DEFAULT 0,
+            is_ai_generated BOOLEAN NOT NULL DEFAULT FALSE,
+            requires_human_validation BOOLEAN NOT NULL DEFAULT FALSE,
+            is_approved BOOLEAN NOT NULL DEFAULT FALSE,
             approved_at TEXT,
             external_message_id TEXT,
             metadata TEXT,
@@ -152,21 +148,23 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (conversation_id)
                 REFERENCES conversations(id)
                 ON DELETE CASCADE
-        );
+        )
+        """,
 
+        """
         CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            contact_id INTEGER,
-            conversation_id INTEGER,
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            contact_id BIGINT,
+            conversation_id BIGINT,
             title TEXT NOT NULL,
             description TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             priority TEXT NOT NULL DEFAULT 'normal',
             due_at TEXT,
-            reminder_enabled INTEGER NOT NULL DEFAULT 0,
+            reminder_enabled BOOLEAN NOT NULL DEFAULT FALSE,
             reminder_at TEXT,
-            reminder_sent INTEGER NOT NULL DEFAULT 0,
+            reminder_sent BOOLEAN NOT NULL DEFAULT FALSE,
             completed_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -182,13 +180,15 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (conversation_id)
                 REFERENCES conversations(id)
                 ON DELETE SET NULL
-        );
+        )
+        """,
 
+        """
         CREATE TABLE IF NOT EXISTS memories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            contact_id INTEGER,
-            conversation_id INTEGER,
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            contact_id BIGINT,
+            conversation_id BIGINT,
             memory_type TEXT NOT NULL,
             content TEXT NOT NULL,
             importance INTEGER NOT NULL DEFAULT 1,
@@ -207,12 +207,15 @@ def _create_tables(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (conversation_id)
                 REFERENCES conversations(id)
                 ON DELETE SET NULL
-        );
-        """
-    )
+        )
+        """,
+    ]
+
+    for query in queries:
+        connection.execute(query)
 
 
-def _create_indexes(connection: sqlite3.Connection) -> None:
+def _create_indexes(connection) -> None:
     """
     Crée les index nécessaires aux recherches fréquentes.
     """
@@ -290,17 +293,16 @@ def _create_indexes(connection: sqlite3.Connection) -> None:
 
 def initialize_database() -> None:
     """
-    Initialise complètement la base SQLite de VYRA V1.
-
-    Cette fonction est appelée au démarrage de FastAPI
-    depuis app/main.py.
+    Initialise la base PostgreSQL de VYRA.
     """
-
     connection = create_connection()
 
     try:
         _create_tables(connection)
         _create_indexes(connection)
         connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
