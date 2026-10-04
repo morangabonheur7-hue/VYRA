@@ -411,24 +411,41 @@ class WhatsAppCloudService:
     # ------------------------------------------------------------------
 
     def verify_webhook(
-        self,
-        mode: Optional[str],
-        token: Optional[str],
-        challenge: Optional[str],
-    ) -> Optional[str]:
+    self,
+    mode: Optional[str],
+    token: Optional[str],
+    challenge: Optional[str],
+) -> Optional[str]:
 
-        if (
-            mode == "subscribe"
-            and token
-            and self.verify_token
-            and hmac.compare_digest(
-                token,
-                self.verify_token,
-            )
-        ):
-            return challenge
+    configured_token = (
+        os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+        .strip()
+    )
 
-        return None
+    received_token = (
+        token.strip()
+        if token is not None
+        else ""
+    )
+
+    received_mode = (
+        mode.strip()
+        if mode is not None
+        else ""
+    )
+
+    if (
+        received_mode == "subscribe"
+        and received_token
+        and configured_token
+        and hmac.compare_digest(
+            received_token,
+            configured_token,
+        )
+    ):
+        return challenge
+
+    return None
 
     # ------------------------------------------------------------------
     # WEBHOOK SIGNATURE
