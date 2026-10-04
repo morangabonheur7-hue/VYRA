@@ -40,7 +40,7 @@ class WhatsAppCloudService:
     Les informations propres à chaque entreprise sont récupérées
     depuis la table integrations.
 
-    Variables globales utilisées uniquement pour la sécurité/API :
+    Variables globales :
 
         WHATSAPP_API_VERSION
         WHATSAPP_APP_SECRET
@@ -411,41 +411,43 @@ class WhatsAppCloudService:
     # ------------------------------------------------------------------
 
     def verify_webhook(
-    self,
-    mode: Optional[str],
-    token: Optional[str],
-    challenge: Optional[str],
-) -> Optional[str]:
+        self,
+        mode: Optional[str],
+        token: Optional[str],
+        challenge: Optional[str],
+    ) -> Optional[str]:
 
-    configured_token = (
-        os.getenv("WHATSAPP_VERIFY_TOKEN", "")
-        .strip()
-    )
-
-    received_token = (
-        token.strip()
-        if token is not None
-        else ""
-    )
-
-    received_mode = (
-        mode.strip()
-        if mode is not None
-        else ""
-    )
-
-    if (
-        received_mode == "subscribe"
-        and received_token
-        and configured_token
-        and hmac.compare_digest(
-            received_token,
-            configured_token,
+        configured_token = (
+            os.getenv(
+                "WHATSAPP_VERIFY_TOKEN",
+                "",
+            ).strip()
         )
-    ):
-        return challenge
 
-    return None
+        received_token = (
+            token.strip()
+            if token is not None
+            else ""
+        )
+
+        received_mode = (
+            mode.strip()
+            if mode is not None
+            else ""
+        )
+
+        if (
+            received_mode == "subscribe"
+            and received_token
+            and configured_token
+            and hmac.compare_digest(
+                received_token,
+                configured_token,
+            )
+        ):
+            return challenge
+
+        return None
 
     # ------------------------------------------------------------------
     # WEBHOOK SIGNATURE
