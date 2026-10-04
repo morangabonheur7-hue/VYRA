@@ -8,11 +8,14 @@ from app.api import (
     auth,
     contacts,
     conversations,
+    integrations,
     messages,
     tasks,
     users,
     whatsapp,
+    whatsapp_cloud,
 )
+
 from app.core.config import settings
 from app.core.database import initialize_database
 from app.core.errors import VYRAError
@@ -20,7 +23,9 @@ from app.core.errors import VYRAError
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+
     initialize_database()
+
     yield
 
 
@@ -28,34 +33,39 @@ app = FastAPI(
     title=settings.api_title,
     description=settings.api_description,
     version=settings.app_version,
-    debug=settings.debug,
     lifespan=lifespan,
 )
 
 
 @app.exception_handler(VYRAError)
-async def vyra_exception_handler(request: Request, exc: VYRAError):
+async def vyra_error_handler(
+    request: Request,
+    exc: VYRAError,
+):
     return JSONResponse(
-        status_code=exc.status_code,
-        content=exc.to_dict(),
+        status_code=400,
+        content={
+            "success": False,
+            "error": exc.code,
+            "message": exc.message,
+        },
     )
 
 
 @app.get("/")
-async def root():
+def root():
     return {
-        "name": "VYRA",
+        "name": settings.app_name,
         "version": settings.app_version,
         "status": "online",
     }
 
 
 @app.get("/health")
-async def health():
+def health():
     return {
         "status": "healthy",
-        "service": "VYRA API",
-        "version": settings.app_version,
+        "service": "VYRA",
     }
 
 
@@ -96,5 +106,15 @@ app.include_router(
 
 app.include_router(
     whatsapp.router,
+    prefix=settings.api_prefix,
+)
+
+app.include_router(
+    whatsapp_cloud.router,
+    prefix=settings.api_prefix,
+)
+
+app.include_router(
+    integrations.router,
     prefix=settings.api_prefix,
 )
