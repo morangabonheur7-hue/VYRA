@@ -4,7 +4,7 @@ from typing import Any
 
 from psycopg import Connection
 
-from app.ai.gateway import AIGateway
+from app.ai.gateway import AIGateway, AIRequest
 from app.services.conversations import ConversationService
 from app.services.messages import MessageService
 
@@ -29,32 +29,34 @@ class AIProcessor:
             limit=20,
         )
 
-        messages = []
+        messages: list[dict[str, str]] = []
 
         for item in history:
             role = item.get("role", "user")
             content = item.get("content", "")
 
             if content:
-                messages.append({
-                    "role": role,
-                    "content": content,
-                })
+                messages.append(
+                    {
+                        "role": role,
+                        "content": content,
+                    }
+                )
 
-        messages.append({
-            "role": "user",
-            "content": user_message,
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": user_message,
+            }
+        )
 
-        response = self.ai.generate(
+        request = AIRequest(
             messages=messages,
         )
 
-        text = (
-            response.get("text")
-            or response.get("content")
-            or ""
-        )
+        response = self.ai.generate(request)
+
+        text = response.text.strip()
 
         if not text:
             raise RuntimeError(
@@ -67,6 +69,8 @@ class AIProcessor:
             content=text,
             metadata={
                 "source": "ai",
+                "provider": response.provider,
+                "model": response.model,
             },
         )
 
