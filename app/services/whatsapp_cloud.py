@@ -15,11 +15,11 @@ from app.core.errors import VYRAError
 
 @dataclass
 class WhatsAppSendResult:
-success: bool
-message_id: Optional[str] = None
-raw_response: Optional[dict[str, Any]] = None
-error: Optional[str] = None
-status_code: Optional[int] = None
+    success: bool
+    message_id: Optional[str] = None
+    raw_response: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+    status_code: Optional[int] = None
 
 class WhatsAppCloudService:
 """Service WhatsApp Cloud API de VYRA."""
