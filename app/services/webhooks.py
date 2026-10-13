@@ -11,24 +11,10 @@ from app.core.errors import VYRAError
 
 
 class WebhookService:
-    """
-    Service de gestion des événements webhook.
-
-    Responsabilités :
-    - enregistrer les événements entrants ;
-    - empêcher les doublons ;
-    - retrouver un événement ;
-    - marquer un événement comme traité ;
-    - marquer un événement en erreur ;
-    - permettre la reprise après un redémarrage.
-    """
+    """Gestion des événements webhook de VYRA."""
 
     def __init__(self, connection: Connection):
         self.connection = connection
-
-    # ------------------------------------------------------------------
-    # ID EMPREINTE
-    # ------------------------------------------------------------------
 
     @staticmethod
     def build_event_id(
@@ -36,13 +22,6 @@ class WebhookService:
         event_type: str,
         payload: dict[str, Any],
     ) -> str:
-        """
-        Construit un identifiant déterministe à partir du webhook.
-
-        Si Meta renvoie exactement le même événement plusieurs fois,
-        la même empreinte sera produite.
-        """
-
         normalized = json.dumps(
             {
                 "provider": provider,
@@ -58,9 +37,10 @@ class WebhookService:
             normalized.encode("utf-8")
         ).hexdigest()
 
-    # ------------------------------------------------------------------
-    # CREATE
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _row_to_dict(cursor: Any, row: Any) -> dict[str, Any]:
+        columns = [column.name for column in cursor.description]
+        return dict(zip(columns, row))
 
     def create(
         self,
@@ -73,14 +53,11 @@ class WebhookService:
         integration_id: Optional[int] = None,
     ) -> dict[str, Any]:
         """
-        Enregistre un événement webhook.
+        Enregistre un événement dans webhook_events.
 
-        Retourne :
-        {
-            "event": {...},
-            "created": True/False,
-            "duplicate": True/False
-        }
+        integration_id est conservé pour la compatibilité avec les
+        appels existants, mais n'est pas enregistré car la colonne
+        correspondante n'existe pas dans cette table.
         """
 
         event_id = external_event_id or self.build_event_id(
@@ -94,74 +71,68 @@ class WebhookService:
             ensure_ascii=False,
         )
 
-        query = """
-            INSERT INTO webhook_events (
-                event_id,
-                provider,
-                event_type,
-                company_id,
-                integration_id,
-                payload,
-                status,
-                attempts,
-                received_at,
-                updated_at
+        now = datetime.now(timezone.utc).isoformat()
+
+        try:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO webhook_events (
+                    company_id,
+                    provider,
+                    external_event_id,
+                    event_type,
+                    payload,
+                    status,
+                    attempts,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, 'pending', 0, %s, %s
+                )
+                ON CONFLICT (
+                    company_id,
+                    provider,
+                    external_event_id
+                )
+                DO NOTHING
+                RETURNING *
+                """,
+                (
+                    company_id,
+                    provider,
+                    event_id,
+                    event_type,
+                    payload_json,
+                    now,
+                    now,
+                ),
             )
-            VALUES (
-                %s,
-                %s,
-                %s,
-                %s,
-                %s,
-                %s::jsonb,
-                'pending',
-                0,
-                %s,
-                %s
-            )
-            ON CONFLICT (event_id)
-            DO NOTHING
-            RETURNING *
-        """
 
-        now = datetime.now(timezone.utc)
+            row = cursor.fetchone()
 
-        cursor = self.connection.execute(
-            query,
-            (
-                event_id,
-                provider,
-                event_type,
-                company_id,
-                integration_id,
-                payload_json,
-                now,
-                now,
-            ),
-        )
+            if row is not None:
+                event = self._row_to_dict(cursor, row)
+                self.connection.commit()
 
-        row = cursor.fetchone()
-
-        if row is not None:
-            columns = [desc.name for desc in cursor.description]
-            event = dict(zip(columns, row))
+                return {
+                    "event": event,
+                    "created": True,
+                    "duplicate": False,
+                }
 
             self.connection.commit()
 
-            return {
-                "event": event,
-                "created": True,
-                "duplicate": False,
-            }
-
-        self.connection.rollback()
+        except Exception:
+            self.connection.rollback()
+            raise
 
         existing = self.get_by_event_id(event_id)
 
         if existing is None:
             raise VYRAError(
                 "WEBHOOK_CREATE_FAILED",
-                "Impossible d'enregistrer l'événement webhook.",
+                "Impossible de retrouver l'événement webhook enregistré.",
             )
 
         return {
@@ -169,10 +140,6 @@ class WebhookService:
             "created": False,
             "duplicate": True,
         }
-
-    # ------------------------------------------------------------------
-    # GET
-    # ------------------------------------------------------------------
 
     def get_by_event_id(
         self,
@@ -182,7 +149,8 @@ class WebhookService:
             """
             SELECT *
             FROM webhook_events
-            WHERE event_id = %s
+            WHERE external_event_id = %s
+            ORDER BY created_at DESC
             LIMIT 1
             """,
             (event_id,),
@@ -193,204 +161,166 @@ class WebhookService:
         if row is None:
             return None
 
-        columns = [desc.name for desc in cursor.description]
-
-        return dict(zip(columns, row))
-
-    # ------------------------------------------------------------------
-    # CLAIM
-    # ------------------------------------------------------------------
+        return self._row_to_dict(cursor, row)
 
     def claim(
         self,
         event_id: str,
     ) -> Optional[dict[str, Any]]:
-        """
-        Réserve un événement pour traitement.
+        """Réserve un événement en attente pour son traitement."""
 
-        Grâce à FOR UPDATE SKIP LOCKED, deux workers ne devraient
-        pas traiter simultanément le même événement.
-        """
+        now = datetime.now(timezone.utc).isoformat()
 
-        now = datetime.now(timezone.utc)
+        try:
+            cursor = self.connection.execute(
+                """
+                SELECT *
+                FROM webhook_events
+                WHERE external_event_id = %s
+                  AND status = 'pending'
+                FOR UPDATE SKIP LOCKED
+                """,
+                (event_id,),
+            )
 
-        cursor = self.connection.execute(
-            """
-            SELECT *
-            FROM webhook_events
-            WHERE event_id = %s
-              AND status = 'pending'
-            FOR UPDATE SKIP LOCKED
-            """,
-            (event_id,),
-        )
+            row = cursor.fetchone()
 
-        row = cursor.fetchone()
+            if row is None:
+                self.connection.commit()
+                return None
 
-        if row is None:
+            cursor = self.connection.execute(
+                """
+                UPDATE webhook_events
+                SET
+                    status = 'processing',
+                    attempts = COALESCE(attempts, 0) + 1,
+                    processed_at = NULL,
+                    updated_at = %s
+                WHERE external_event_id = %s
+                RETURNING *
+                """,
+                (now, event_id),
+            )
+
+            updated_row = cursor.fetchone()
+
+            if updated_row is None:
+                self.connection.rollback()
+                return None
+
+            event = self._row_to_dict(cursor, updated_row)
             self.connection.commit()
-            return None
+            return event
 
-        columns = [desc.name for desc in cursor.description]
-        event = dict(zip(columns, row))
-
-        update_cursor = self.connection.execute(
-            """
-            UPDATE webhook_events
-            SET
-                status = 'processing',
-                attempts = COALESCE(attempts, 0) + 1,
-                processed_at = NULL,
-                updated_at = %s
-            WHERE event_id = %s
-            RETURNING *
-            """,
-            (now, event_id),
-        )
-
-        updated_row = update_cursor.fetchone()
-
-        if updated_row is None:
+        except Exception:
             self.connection.rollback()
-            return None
-
-        updated_columns = [
-            desc.name for desc in update_cursor.description
-        ]
-
-        updated_event = dict(
-            zip(updated_columns, updated_row)
-        )
-
-        self.connection.commit()
-
-        return updated_event
-
-    # ------------------------------------------------------------------
-    # COMPLETE
-    # ------------------------------------------------------------------
+            raise
 
     def mark_processed(
         self,
         event_id: str,
     ) -> Optional[dict[str, Any]]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).isoformat()
 
-        cursor = self.connection.execute(
-            """
-            UPDATE webhook_events
-            SET
-                status = 'processed',
-                processed_at = %s,
-                updated_at = %s,
-                error_message = NULL
-            WHERE event_id = %s
-            RETURNING *
-            """,
-            (
-                now,
-                now,
-                event_id,
-            ),
-        )
+        try:
+            cursor = self.connection.execute(
+                """
+                UPDATE webhook_events
+                SET
+                    status = 'processed',
+                    processed_at = %s,
+                    updated_at = %s,
+                    error = NULL
+                WHERE external_event_id = %s
+                RETURNING *
+                """,
+                (now, now, event_id),
+            )
 
-        row = cursor.fetchone()
+            row = cursor.fetchone()
 
-        if row is None:
+            if row is None:
+                self.connection.rollback()
+                return None
+
+            event = self._row_to_dict(cursor, row)
+            self.connection.commit()
+            return event
+
+        except Exception:
             self.connection.rollback()
-            return None
-
-        columns = [desc.name for desc in cursor.description]
-        event = dict(zip(columns, row))
-
-        self.connection.commit()
-
-        return event
-
-    # ------------------------------------------------------------------
-    # ERROR
-    # ------------------------------------------------------------------
+            raise
 
     def mark_failed(
         self,
         event_id: str,
         error_message: str,
     ) -> Optional[dict[str, Any]]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).isoformat()
 
-        cursor = self.connection.execute(
-            """
-            UPDATE webhook_events
-            SET
-                status = 'failed',
-                error_message = %s,
-                updated_at = %s
-            WHERE event_id = %s
-            RETURNING *
-            """,
-            (
-                error_message[:4000],
-                now,
-                event_id,
-            ),
-        )
+        try:
+            cursor = self.connection.execute(
+                """
+                UPDATE webhook_events
+                SET
+                    status = 'failed',
+                    error = %s,
+                    updated_at = %s
+                WHERE external_event_id = %s
+                RETURNING *
+                """,
+                (error_message[:4000], now, event_id),
+            )
 
-        row = cursor.fetchone()
+            row = cursor.fetchone()
 
-        if row is None:
+            if row is None:
+                self.connection.rollback()
+                return None
+
+            event = self._row_to_dict(cursor, row)
+            self.connection.commit()
+            return event
+
+        except Exception:
             self.connection.rollback()
-            return None
-
-        columns = [desc.name for desc in cursor.description]
-        event = dict(zip(columns, row))
-
-        self.connection.commit()
-
-        return event
-
-    # ------------------------------------------------------------------
-    # RETRY
-    # ------------------------------------------------------------------
+            raise
 
     def retry(
         self,
         event_id: str,
     ) -> Optional[dict[str, Any]]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).isoformat()
 
-        cursor = self.connection.execute(
-            """
-            UPDATE webhook_events
-            SET
-                status = 'pending',
-                error_message = NULL,
-                updated_at = %s
-            WHERE event_id = %s
-              AND status IN ('failed', 'processing')
-            RETURNING *
-            """,
-            (
-                now,
-                event_id,
-            ),
-        )
+        try:
+            cursor = self.connection.execute(
+                """
+                UPDATE webhook_events
+                SET
+                    status = 'pending',
+                    error = NULL,
+                    updated_at = %s
+                WHERE external_event_id = %s
+                  AND status IN ('failed', 'processing')
+                RETURNING *
+                """,
+                (now, event_id),
+            )
 
-        row = cursor.fetchone()
+            row = cursor.fetchone()
 
-        if row is None:
+            if row is None:
+                self.connection.rollback()
+                return None
+
+            event = self._row_to_dict(cursor, row)
+            self.connection.commit()
+            return event
+
+        except Exception:
             self.connection.rollback()
-            return None
-
-        columns = [desc.name for desc in cursor.description]
-        event = dict(zip(columns, row))
-
-        self.connection.commit()
-
-        return event
-
-    # ------------------------------------------------------------------
-    # PENDING EVENTS
-    # ------------------------------------------------------------------
+            raise
 
     def get_pending(
         self,
@@ -403,7 +333,7 @@ class WebhookService:
             SELECT *
             FROM webhook_events
             WHERE status = 'pending'
-            ORDER BY received_at ASC
+            ORDER BY created_at ASC
             LIMIT %s
             """,
             (limit,),
@@ -411,16 +341,10 @@ class WebhookService:
 
         rows = cursor.fetchall()
 
-        columns = [desc.name for desc in cursor.description]
-
         return [
-            dict(zip(columns, row))
+            self._row_to_dict(cursor, row)
             for row in rows
         ]
-
-    # ------------------------------------------------------------------
-    # FAILED EVENTS
-    # ------------------------------------------------------------------
 
     def get_failed(
         self,
@@ -441,9 +365,7 @@ class WebhookService:
 
         rows = cursor.fetchall()
 
-        columns = [desc.name for desc in cursor.description]
-
         return [
-            dict(zip(columns, row))
+            self._row_to_dict(cursor, row)
             for row in rows
-        ]
+]
